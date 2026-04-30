@@ -20,13 +20,13 @@
 package org.apache.gravitino.storage.relational.utils;
 
 import static org.apache.gravitino.file.Fileset.LOCATION_NAME_UNKNOWN;
-import static org.apache.gravitino.policy.Policy.SUPPORTS_ALL_OBJECT_TYPES;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -37,7 +37,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.Entity;
@@ -57,15 +56,25 @@ import org.apache.gravitino.meta.ModelVersionEntity;
 import org.apache.gravitino.meta.PolicyEntity;
 import org.apache.gravitino.meta.SchemaEntity;
 import org.apache.gravitino.meta.SchemaVersion;
+import org.apache.gravitino.meta.StatisticEntity;
 import org.apache.gravitino.meta.TableEntity;
+import org.apache.gravitino.meta.TableStatisticEntity;
 import org.apache.gravitino.meta.TagEntity;
 import org.apache.gravitino.meta.TopicEntity;
+import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.policy.PolicyContents;
 import org.apache.gravitino.rel.expressions.Expression;
+import org.apache.gravitino.rel.expressions.NamedReference;
+import org.apache.gravitino.rel.expressions.distributions.Distributions;
+import org.apache.gravitino.rel.expressions.distributions.Strategy;
 import org.apache.gravitino.rel.expressions.literals.Literals;
+import org.apache.gravitino.rel.expressions.sorts.SortDirection;
+import org.apache.gravitino.rel.expressions.sorts.SortOrder;
+import org.apache.gravitino.rel.expressions.sorts.SortOrders;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.rel.types.Types;
+import org.apache.gravitino.stats.StatisticValues;
 import org.apache.gravitino.storage.relational.po.CatalogPO;
 import org.apache.gravitino.storage.relational.po.ColumnPO;
 import org.apache.gravitino.storage.relational.po.FilesetPO;
@@ -78,6 +87,8 @@ import org.apache.gravitino.storage.relational.po.OwnerRelPO;
 import org.apache.gravitino.storage.relational.po.PolicyPO;
 import org.apache.gravitino.storage.relational.po.PolicyVersionPO;
 import org.apache.gravitino.storage.relational.po.SchemaPO;
+import org.apache.gravitino.storage.relational.po.SecurableObjectPO;
+import org.apache.gravitino.storage.relational.po.StatisticPO;
 import org.apache.gravitino.storage.relational.po.TablePO;
 import org.apache.gravitino.storage.relational.po.TagMetadataObjectRelPO;
 import org.apache.gravitino.storage.relational.po.TagPO;
@@ -612,6 +623,15 @@ public class TestPOConverters {
     assertEquals(1, initPO.getCurrentVersion());
     assertEquals(1, initPO.getLastVersion());
     assertEquals(0, initPO.getDeletedAt());
+
+    TableEntity entity =
+        POConverters.fromTableAndColumnPOs(
+            initPO,
+            Lists.newArrayList(),
+            NamespaceUtil.ofTable("test_metalake", "test_catalog", "test_schema"));
+
+    Assertions.assertEquals(tableEntity.distribution(), entity.distribution());
+    Assertions.assertArrayEquals(tableEntity.partitioning(), entity.partitioning());
   }
 
   @Test
@@ -690,7 +710,7 @@ public class TestPOConverters {
     TablePO.Builder builder =
         TablePO.builder().withMetalakeId(1L).withCatalogId(1L).withSchemaId(1L);
     TablePO initPO = POConverters.initializeTablePOWithVersion(tableEntity, builder);
-    TablePO updatePO = POConverters.updateTablePOWithVersion(initPO, updatedTable, false);
+    TablePO updatePO = POConverters.updateTablePOWithVersionAndSchemaId(initPO, updatedTable, 1L);
     assertEquals(1, initPO.getCurrentVersion());
     assertEquals(1, initPO.getLastVersion());
     assertEquals(0, initPO.getDeletedAt());
@@ -777,24 +797,21 @@ public class TestPOConverters {
 
   @Test
   public void testFromPolicyPO() throws JsonProcessingException {
-    PolicyContent content = PolicyContents.custom(null, null);
+    ImmutableSet<MetadataObject.Type> supportedObjectTypes =
+        ImmutableSet.of(MetadataObject.Type.TABLE, MetadataObject.Type.SCHEMA);
+    PolicyContent content = PolicyContents.custom(null, supportedObjectTypes, null);
     PolicyVersionPO policyVersionPO =
         createPolicyVersionPO(1L, 1L, 1L, "test comment", true, content);
-    PolicyPO policyPO =
-        createPolicyPO(
-            1L, "test", "my_type", 1L, true, true, SUPPORTS_ALL_OBJECT_TYPES, policyVersionPO);
+    PolicyPO policyPO = createPolicyPO(1L, "test", "custom", 1L, policyVersionPO);
 
     PolicyEntity expectedPolicy =
         createPolicy(
             1L,
             "test",
             NamespaceUtil.ofPolicy("test_metalake"),
-            "my_type",
+            Policy.BuiltInType.CUSTOM,
             "test comment",
             true,
-            true,
-            true,
-            SUPPORTS_ALL_OBJECT_TYPES,
             content);
 
     PolicyEntity convertedPolicy =
@@ -807,9 +824,6 @@ public class TestPOConverters {
     assertEquals(expectedPolicy.policyType(), convertedPolicy.policyType());
     assertEquals(expectedPolicy.comment(), convertedPolicy.comment());
     assertEquals(expectedPolicy.enabled(), convertedPolicy.enabled());
-    assertEquals(expectedPolicy.inheritable(), convertedPolicy.inheritable());
-    assertEquals(expectedPolicy.exclusive(), convertedPolicy.exclusive());
-    assertEquals(expectedPolicy.supportedObjectTypes(), convertedPolicy.supportedObjectTypes());
     assertEquals(expectedPolicy.content(), convertedPolicy.content());
   }
 
@@ -1211,6 +1225,104 @@ public class TestPOConverters {
     assertEquals(expectedModelVersionWithNull, convertedModelVersionWithNull);
   }
 
+  @Test
+  public void testUpdateModelVersionAliasRelPO() {
+    NameIdentifier modelIdent = NameIdentifierUtil.ofModel("m", "c", "s", "model1");
+    AuditInfo auditInfo =
+        AuditInfo.builder().withCreator("creator").withCreateTime(FIX_INSTANT).build();
+    List<String> newAliases = ImmutableList.of("alias3", "alias4");
+    Long modelId = 1L;
+
+    ModelVersionEntity newModelVersion =
+        ModelVersionEntity.builder()
+            .withModelIdentifier(modelIdent)
+            .withVersion(1)
+            .withAliases(newAliases)
+            .withComment("test")
+            .withProperties(null)
+            .withUris(ImmutableMap.of("uri", "hdfs://localhost/test"))
+            .withAuditInfo(auditInfo)
+            .build();
+
+    // Case 1: old alias list is non-empty — modelId/version copied from old PO
+    List<ModelVersionAliasRelPO> oldAliasPOs =
+        ImmutableList.of(
+            ModelVersionAliasRelPO.builder()
+                .withModelVersionAlias("alias1")
+                .withModelVersion(1)
+                .withModelId(modelId)
+                .withDeletedAt(0L)
+                .build());
+
+    List<ModelVersionAliasRelPO> result =
+        POConverters.updateModelVersionAliasRelPO(oldAliasPOs, newModelVersion, modelId);
+    assertEquals(2, result.size());
+    assertEquals("alias3", result.get(0).getModelVersionAlias());
+    assertEquals("alias4", result.get(1).getModelVersionAlias());
+    assertEquals(1, result.get(0).getModelVersion());
+    assertEquals(modelId, result.get(0).getModelId());
+
+    // Case 2: old alias list is empty (model version created without aliases) — should not throw
+    List<ModelVersionAliasRelPO> resultFromEmpty =
+        POConverters.updateModelVersionAliasRelPO(
+            Collections.emptyList(), newModelVersion, modelId);
+    assertEquals(2, resultFromEmpty.size());
+    assertEquals("alias3", resultFromEmpty.get(0).getModelVersionAlias());
+    assertEquals("alias4", resultFromEmpty.get(1).getModelVersionAlias());
+    assertEquals(1, resultFromEmpty.get(0).getModelVersion());
+    assertEquals(modelId, resultFromEmpty.get(0).getModelId());
+  }
+
+  @Test
+  public void testStatisticPO() throws JsonProcessingException {
+    List<StatisticEntity> statisticEntities = Lists.newArrayList();
+    statisticEntities.add(
+        TableStatisticEntity.builder()
+            .withId(1L)
+            .withName("test_statistic")
+            .withNamespace(
+                NameIdentifierUtil.ofStatistic(
+                        NameIdentifierUtil.ofTable("test", "test", "test", "test"), "test")
+                    .namespace())
+            .withValue(StatisticValues.stringValue("test"))
+            .withAuditInfo(
+                AuditInfo.builder().withCreator("creator").withCreateTime(FIX_INSTANT).build())
+            .build());
+
+    List<StatisticPO> statisticPOs =
+        StatisticPO.initializeStatisticPOs(statisticEntities, 1L, 1L, MetadataObject.Type.CATALOG);
+
+    assertEquals(1, statisticPOs.get(0).getCurrentVersion());
+    assertEquals(1, statisticPOs.get(0).getLastVersion());
+    assertEquals(0, statisticPOs.get(0).getDeletedAt());
+    assertEquals("\"test\"", statisticPOs.get(0).getStatisticValue());
+    assertEquals("test_statistic", statisticPOs.get(0).getStatisticName());
+
+    StatisticPO statisticPO =
+        StatisticPO.builder()
+            .withStatisticId(1L)
+            .withLastVersion(1L)
+            .withCurrentVersion(1L)
+            .withStatisticName("test")
+            .withStatisticValue("\"test\"")
+            .withMetadataObjectId(1L)
+            .withMetadataObjectType("TABLE")
+            .withDeletedAt(0L)
+            .withMetalakeId(1L)
+            .withAuditInfo(
+                JsonUtils.anyFieldMapper()
+                    .writeValueAsString(
+                        AuditInfo.builder()
+                            .withCreator("creator")
+                            .withCreateTime(FIX_INSTANT)
+                            .build()))
+            .build();
+    StatisticEntity entity = StatisticPO.fromStatisticPO(statisticPO);
+    Assertions.assertEquals(1L, entity.id());
+    Assertions.assertEquals("test", entity.name());
+    Assertions.assertEquals("test", entity.value().value());
+  }
+
   private static BaseMetalake createMetalake(Long id, String name, String comment) {
     AuditInfo auditInfo =
         AuditInfo.builder().withCreator("creator").withCreateTime(FIX_INSTANT).build();
@@ -1334,6 +1446,9 @@ public class TestPOConverters {
         .withName(name)
         .withNamespace(namespace)
         .withColumns(columns)
+        .withDistribution(Distributions.of(Strategy.EVEN, 10, NamedReference.field("key")))
+        .withSortOrders(
+            new SortOrder[] {SortOrders.of(NamedReference.field("col1"), SortDirection.ASCENDING)})
         .withAuditInfo(auditInfo)
         .build();
   }
@@ -1536,12 +1651,9 @@ public class TestPOConverters {
       Long id,
       String name,
       Namespace namespace,
-      String type,
+      Policy.BuiltInType type,
       String comment,
       boolean enabled,
-      boolean exclusive,
-      boolean inheritable,
-      Set<MetadataObject.Type> supportedObjectTypes,
       PolicyContent content) {
     AuditInfo auditInfo =
         AuditInfo.builder().withCreator("creator").withCreateTime(FIX_INSTANT).build();
@@ -1552,23 +1664,13 @@ public class TestPOConverters {
         .withPolicyType(type)
         .withComment(comment)
         .withEnabled(enabled)
-        .withExclusive(exclusive)
-        .withInheritable(inheritable)
-        .withSupportedObjectTypes(supportedObjectTypes)
         .withContent(content)
         .withAuditInfo(auditInfo)
         .build();
   }
 
   private static PolicyPO createPolicyPO(
-      Long id,
-      String name,
-      String policyType,
-      Long metalakeId,
-      boolean inheritable,
-      boolean exclusive,
-      Set<MetadataObject.Type> supportedObjectTypes,
-      PolicyVersionPO policyVersionPO)
+      Long id, String name, String policyType, Long metalakeId, PolicyVersionPO policyVersionPO)
       throws JsonProcessingException {
     AuditInfo auditInfo =
         AuditInfo.builder().withCreator("creator").withCreateTime(FIX_INSTANT).build();
@@ -1577,10 +1679,6 @@ public class TestPOConverters {
         .withPolicyName(name)
         .withPolicyType(policyType)
         .withMetalakeId(metalakeId)
-        .withInheritable(inheritable)
-        .withExclusive(exclusive)
-        .withSupportedObjectTypes(
-            JsonUtils.anyFieldMapper().writeValueAsString(supportedObjectTypes))
         .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(auditInfo))
         .withCurrentVersion(1L)
         .withLastVersion(1L)
@@ -1639,5 +1737,26 @@ public class TestPOConverters {
         .withProperties(properties)
         .withAuditInfo(auditInfo)
         .build();
+  }
+
+  @Test
+  public void testFromSecurableObjectPOWithNullPrivileges() {
+    SecurableObjectPO securableObjectPO =
+        SecurableObjectPO.builder()
+            .withRoleId(1L)
+            .withMetadataObjectId(1L)
+            .withType(MetadataObject.Type.CATALOG.name())
+            .withPrivilegeNames("null")
+            .withPrivilegeConditions("[\"ALLOW\"]")
+            .withCurrentVersion(1L)
+            .withLastVersion(1L)
+            .withDeletedAt(0L)
+            .build();
+
+    Assertions.assertThrows(
+        RuntimeException.class,
+        () ->
+            POConverters.fromSecurableObjectPO(
+                "test_catalog", securableObjectPO, MetadataObject.Type.CATALOG));
   }
 }

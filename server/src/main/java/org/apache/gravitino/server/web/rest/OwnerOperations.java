@@ -18,6 +18,7 @@
  */
 package org.apache.gravitino.server.web.rest;
 
+import static org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants.CAN_ACCESS_METADATA;
 import static org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConverter.CAN_SET_OWNER;
 
 import com.codahale.metrics.annotation.ResponseMetered;
@@ -32,6 +33,7 @@ import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
+import org.apache.gravitino.Entity;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
@@ -41,9 +43,13 @@ import org.apache.gravitino.dto.requests.OwnerSetRequest;
 import org.apache.gravitino.dto.responses.OwnerResponse;
 import org.apache.gravitino.dto.responses.SetResponse;
 import org.apache.gravitino.dto.util.DTOConverters;
+import org.apache.gravitino.metalake.MetalakeManager;
 import org.apache.gravitino.metrics.MetricNames;
 import org.apache.gravitino.server.authorization.NameBindings;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationFullName;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationObjectType;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.MetadataObjectUtil;
 
@@ -67,10 +73,14 @@ public class OwnerOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "get-object-owner." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-object-owner", absolute = true)
+  @AuthorizationExpression(
+      expression = CAN_ACCESS_METADATA,
+      errorMessage = "Current user can not get this objects's owner")
   public Response getOwnerForObject(
-      @PathParam("metalake") String metalake,
-      @PathParam("metadataObjectType") String metadataObjectType,
-      @PathParam("fullName") String fullName) {
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("metadataObjectType") @AuthorizationObjectType String metadataObjectType,
+      @PathParam("fullName") @AuthorizationFullName String fullName) {
     try {
       MetadataObject object =
           MetadataObjects.parse(
@@ -78,6 +88,7 @@ public class OwnerOperations {
       return Utils.doAs(
           httpRequest,
           () -> {
+            MetalakeManager.checkMetalakeInUse(metalake);
             MetadataObjectUtil.checkMetadataObject(metalake, object);
             Optional<Owner> owner = ownerDispatcher.getOwner(metalake, object);
             if (owner.isPresent()) {
@@ -97,9 +108,12 @@ public class OwnerOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "set-object-owner." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "set-object-owner", absolute = true)
-  @AuthorizationExpression(expression = CAN_SET_OWNER)
+  @AuthorizationExpression(
+      expression = CAN_SET_OWNER,
+      errorMessage = "Current user can not set this objects's owner")
   public Response setOwnerForObject(
-      @PathParam("metalake") String metalake,
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
       @PathParam("metadataObjectType") String metadataObjectType,
       @PathParam("fullName") String fullName,
       OwnerSetRequest request) {
@@ -112,6 +126,7 @@ public class OwnerOperations {
           httpRequest,
           () -> {
             request.validate();
+            MetalakeManager.checkMetalakeInUse(metalake);
             MetadataObjectUtil.checkMetadataObject(metalake, object);
             ownerDispatcher.setOwner(metalake, object, request.getName(), request.getType());
             return Utils.ok(new SetResponse(true));

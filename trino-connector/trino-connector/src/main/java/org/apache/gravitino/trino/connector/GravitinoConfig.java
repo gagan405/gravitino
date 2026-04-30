@@ -18,6 +18,9 @@
  */
 package org.apache.gravitino.trino.connector;
 
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+
+import com.google.common.base.Splitter;
 import io.trino.spi.TrinoException;
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -27,7 +30,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.trino.connector.security.GravitinoAuthProvider;
 
 /** Gravitino config. */
 public class GravitinoConfig {
@@ -65,6 +71,7 @@ public class GravitinoConfig {
 
   private static final Map<String, ConfigEntry> CONFIG_DEFINITIONS = new HashMap<>();
   private final Map<String, String> config;
+  private final List<Pattern> skipCatalogPatternList;
 
   // Gravitino config entity
   private static final ConfigEntry GRAVITINO_URI =
@@ -74,7 +81,16 @@ public class GravitinoConfig {
   private static final ConfigEntry GRAVITINO_METALAKE =
       new ConfigEntry("gravitino.metalake", "The metalake name for used", "", true);
 
-  /** @deprecated Please use {@code gravitino.use-single-metalake} instead. */
+  private static final ConfigEntry GRAVITINO_USER =
+      new ConfigEntry(
+          "gravitino.user",
+          "The username for simple authentication with the Gravitino server",
+          "",
+          false);
+
+  /**
+   * @deprecated Please use {@code gravitino.use-single-metalake} instead.
+   */
   @Deprecated
   @SuppressWarnings("UnusedVariable")
   private static final ConfigEntry GRAVITINO_SIMPLIFY_CATALOG_NAMES =
@@ -126,6 +142,30 @@ public class GravitinoConfig {
           "false",
           false);
 
+  private static final ConfigEntry GRAVITINO_CLIENT_CONFIG_PREFIX =
+      new ConfigEntry("gravitino.client.", "The config prefix for Grivitino client", "", false);
+
+  private static final ConfigEntry GRAVITINO_TRINO_SKIP_CATALOG_PATTERNS =
+      new ConfigEntry(
+          "gravitino.trino.skip-catalog-patterns",
+          "The property to specify a comma-separated list of catalog name regex patterns that should be excluded from loading.",
+          "",
+          false);
+
+  private static final ConfigEntry GRAVITINO_SESSION_CACHE_MAX_SIZE =
+      new ConfigEntry(
+          GravitinoAuthProvider.SESSION_CACHE_MAX_SIZE_KEY,
+          "Maximum number of per-user sessions to keep in the cache when session.forwardUser=true",
+          "500",
+          false);
+
+  private static final ConfigEntry GRAVITINO_SESSION_CACHE_EXPIRE_AFTER_ACCESS_SECONDS =
+      new ConfigEntry(
+          GravitinoAuthProvider.SESSION_CACHE_EXPIRE_AFTER_ACCESS_SECONDS_KEY,
+          "Seconds before an idle per-user session is evicted from the cache when session.forwardUser=true",
+          "3600",
+          false);
+
   /**
    * Constructs a new GravitinoConfig with the specified configuration.
    *
@@ -147,6 +187,14 @@ public class GravitinoConfig {
           GravitinoErrorCode.GRAVITINO_MISSING_CONFIG,
           "Incomplete Dynamic catalog connector config");
     }
+    try {
+      skipCatalogPatternList = initSkipCatalogPatterns();
+    } catch (Exception e) {
+      throw new TrinoException(
+          NOT_SUPPORTED,
+          "Config `gravitino.trino.skip-catalog-patterns` is invalid because it contains an illegal regular expression",
+          e);
+    }
   }
 
   /**
@@ -165,6 +213,26 @@ public class GravitinoConfig {
    */
   public String getMetalake() {
     return config.getOrDefault(GRAVITINO_METALAKE.key, GRAVITINO_METALAKE.defaultValue);
+  }
+
+  /**
+   * Retrieves the username for simple authentication.
+   *
+   * @return the username, or empty string if not configured
+   */
+  public String getUser() {
+    return config.getOrDefault(GRAVITINO_USER.key, GRAVITINO_USER.defaultValue);
+  }
+
+  /**
+   * Retrieves the config for Grivitino client.
+   *
+   * @return the config properties map
+   */
+  public Map<String, String> getClientConfig() {
+    return config.entrySet().stream()
+        .filter(entry -> entry.getKey().startsWith(GRAVITINO_CLIENT_CONFIG_PREFIX.key))
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
   }
 
   /**
@@ -286,6 +354,12 @@ public class GravitinoConfig {
         stringList.add(String.format("\"%s\"='%s'", entry.getKey(), value));
       }
     }
+    // copy the configuration by the prefix of GRAVITINO_CLIENT_CONFIG_PREFIX
+    config.entrySet().stream()
+        .filter(entry -> entry.getKey().startsWith(GRAVITINO_CLIENT_CONFIG_PREFIX.key))
+        .forEach(
+            entry ->
+                stringList.add(String.format("\"%s\"='%s'", entry.getKey(), entry.getValue())));
     return StringUtils.join(stringList, ',');
   }
 
@@ -310,6 +384,74 @@ public class GravitinoConfig {
         config.getOrDefault(
             GRAVITINO_TRINO_SKIP_VERSION_VALIDATION.key,
             GRAVITINO_TRINO_SKIP_VERSION_VALIDATION.defaultValue));
+  }
+
+  /**
+   * Init a comma-separated list of catalog name regex patterns that should be excluded from loading
+   *
+   * @return a list of catalog name regex patterns
+   */
+  private List<Pattern> initSkipCatalogPatterns() {
+    String skipCatalogConfig =
+        config.getOrDefault(
+            GRAVITINO_TRINO_SKIP_CATALOG_PATTERNS.key,
+            GRAVITINO_TRINO_SKIP_CATALOG_PATTERNS.defaultValue);
+    return Splitter.on(',')
+        .trimResults()
+        .omitEmptyStrings()
+        .splitToStream(skipCatalogConfig)
+        .map(Pattern::compile)
+        .collect(Collectors.toList());
+  }
+
+  /**
+   * Returns whether Trino session user forwarding is enabled.
+   *
+   * @return true if forwardUser is set to true
+   */
+  public boolean isForwardUser() {
+    return Boolean.parseBoolean(
+        config.getOrDefault(GravitinoAuthProvider.FORWARD_SESSION_USER_KEY, "false"));
+  }
+
+  /**
+   * Retrieves the maximum number of per-user sessions to keep in the cache.
+   *
+   * @return the session cache maximum size
+   */
+  public long getSessionCacheMaxSize() {
+    return parseLongConfigEntry(GRAVITINO_SESSION_CACHE_MAX_SIZE);
+  }
+
+  /**
+   * Retrieves the expiry (in seconds) for idle per-user sessions in the cache.
+   *
+   * @return the session cache expiry in seconds
+   */
+  public long getSessionCacheExpireAfterAccessSeconds() {
+    return parseLongConfigEntry(GRAVITINO_SESSION_CACHE_EXPIRE_AFTER_ACCESS_SECONDS);
+  }
+
+  private long parseLongConfigEntry(ConfigEntry entry) {
+    String value = config.getOrDefault(entry.key, entry.defaultValue);
+    try {
+      return Long.parseLong(value);
+    } catch (NumberFormatException e) {
+      throw new TrinoException(
+          GravitinoErrorCode.GRAVITINO_ILLEGAL_ARGUMENT,
+          "Invalid value for config '" + entry.key + "': expected a number, got: " + value,
+          e);
+    }
+  }
+
+  /**
+   * Retrieves a comma-separated list of catalog name regex patterns that should be excluded from
+   * loading
+   *
+   * @return a list of catalog name regex patterns
+   */
+  public List<Pattern> getSkipCatalogPatterns() {
+    return skipCatalogPatternList;
   }
 
   static class ConfigEntry {

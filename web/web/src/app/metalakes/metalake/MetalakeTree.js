@@ -71,10 +71,14 @@ const MetalakeTree = props => {
             return 'devicon:postgresql-wordmark'
           case 'jdbc-doris':
             return 'custom-icons-doris'
+          case 'jdbc-starrocks':
+            return 'custom-icons-starrocks'
           case 'lakehouse-paimon':
             return 'custom-icons-paimon'
           case 'lakehouse-hudi':
             return 'custom-icons-hudi'
+          case 'lakehouse-generic':
+            return 'material-symbols:houseboat-outline'
           case 'jdbc-oceanbase':
             return 'custom-icons-oceanbase'
           default:
@@ -336,7 +340,6 @@ const MetalakeTree = props => {
 
   useEffect(() => {
     dispatch(setExpandedNodes(store.expandedNodes))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.metalakeTree, dispatch])
 
   return (

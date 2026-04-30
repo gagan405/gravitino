@@ -20,15 +20,14 @@
 package org.apache.gravitino.storage.relational.utils;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import java.time.Instant;
 import java.util.Collections;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Catalog;
@@ -39,7 +38,11 @@ import org.apache.gravitino.authorization.Privilege;
 import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.SecurableObject;
 import org.apache.gravitino.authorization.SecurableObjects;
+import org.apache.gravitino.dto.rel.DistributionDTO;
+import org.apache.gravitino.dto.rel.SortOrderDTO;
 import org.apache.gravitino.dto.rel.expressions.FunctionArg;
+import org.apache.gravitino.dto.rel.indexes.IndexDTO;
+import org.apache.gravitino.dto.rel.partitioning.Partitioning;
 import org.apache.gravitino.dto.util.DTOConverters;
 import org.apache.gravitino.file.Fileset;
 import org.apache.gravitino.json.JsonUtils;
@@ -62,6 +65,7 @@ import org.apache.gravitino.meta.UserEntity;
 import org.apache.gravitino.policy.Policy;
 import org.apache.gravitino.policy.PolicyContent;
 import org.apache.gravitino.rel.Column;
+import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.expressions.Expression;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.storage.relational.po.CatalogPO;
@@ -77,6 +81,7 @@ import org.apache.gravitino.storage.relational.po.ModelPO;
 import org.apache.gravitino.storage.relational.po.ModelVersionAliasRelPO;
 import org.apache.gravitino.storage.relational.po.ModelVersionPO;
 import org.apache.gravitino.storage.relational.po.OwnerRelPO;
+import org.apache.gravitino.storage.relational.po.PolicyMetadataObjectRelPO;
 import org.apache.gravitino.storage.relational.po.PolicyPO;
 import org.apache.gravitino.storage.relational.po.PolicyVersionPO;
 import org.apache.gravitino.storage.relational.po.RolePO;
@@ -92,8 +97,8 @@ import org.apache.gravitino.utils.PrincipalUtils;
 
 /** POConverters is a utility class to convert PO to Base and vice versa. */
 public class POConverters {
-  private static final long INIT_VERSION = 1L;
-  private static final long DEFAULT_DELETED_AT = 0L;
+  public static final long INIT_VERSION = 1L;
+  public static final long DEFAULT_DELETED_AT = 0L;
 
   private POConverters() {}
 
@@ -392,14 +397,43 @@ public class POConverters {
   public static TablePO initializeTablePOWithVersion(
       TableEntity tableEntity, TablePO.Builder builder) {
     try {
-      return builder
+      builder
           .withTableId(tableEntity.id())
           .withTableName(tableEntity.name())
           .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(tableEntity.auditInfo()))
           .withCurrentVersion(INIT_VERSION)
           .withLastVersion(INIT_VERSION)
           .withDeletedAt(DEFAULT_DELETED_AT)
-          .build();
+          .withFormat(
+              tableEntity.properties() == null
+                  ? null
+                  : tableEntity.properties().getOrDefault(Table.PROPERTY_TABLE_FORMAT, null))
+          .withComment(tableEntity.comment())
+          .withProperties(
+              tableEntity.properties() == null
+                  ? null
+                  : JsonUtils.anyFieldMapper().writeValueAsString(tableEntity.properties()))
+          .withIndexes(
+              tableEntity.indexes() == null
+                  ? null
+                  : JsonUtils.anyFieldMapper()
+                      .writeValueAsString(DTOConverters.toDTOs(tableEntity.indexes())))
+          .withDistribution(
+              tableEntity.distribution() == null
+                  ? null
+                  : JsonUtils.anyFieldMapper()
+                      .writeValueAsString(DTOConverters.toDTO(tableEntity.distribution())))
+          .withSortOrders(
+              tableEntity.sortOrders() == null
+                  ? null
+                  : JsonUtils.anyFieldMapper()
+                      .writeValueAsString(DTOConverters.toDTOs(tableEntity.sortOrders())))
+          .withPartitions(
+              tableEntity.partitioning() == null
+                  ? null
+                  : JsonUtils.anyFieldMapper()
+                      .writeValueAsString(DTOConverters.toDTOs(tableEntity.partitioning())));
+      return builder.build();
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to serialize json object:", e);
     }
@@ -410,33 +444,59 @@ public class POConverters {
    *
    * @param oldTablePO the old TablePO object
    * @param newTable the new TableEntity object
-   * @param needUpdateVersion whether need to update the version
+   * @param newSchemaId the new schema id
    * @return TablePO object with updated version
    */
-  public static TablePO updateTablePOWithVersion(
-      TablePO oldTablePO, TableEntity newTable, boolean needUpdateVersion) {
+  public static TablePO updateTablePOWithVersionAndSchemaId(
+      TablePO oldTablePO, TableEntity newTable, Long newSchemaId) {
     Long lastVersion;
     Long currentVersion;
-    if (needUpdateVersion) {
-      lastVersion = oldTablePO.getLastVersion() + 1;
-      currentVersion = lastVersion;
-    } else {
-      lastVersion = oldTablePO.getLastVersion();
-      currentVersion = oldTablePO.getCurrentVersion();
-    }
+    lastVersion = oldTablePO.getLastVersion() + 1;
+    currentVersion = lastVersion;
 
     try {
-      return TablePO.builder()
-          .withTableId(oldTablePO.getTableId())
-          .withTableName(newTable.name())
-          .withMetalakeId(oldTablePO.getMetalakeId())
-          .withCatalogId(oldTablePO.getCatalogId())
-          .withSchemaId(oldTablePO.getSchemaId())
-          .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(newTable.auditInfo()))
-          .withCurrentVersion(currentVersion)
-          .withLastVersion(lastVersion)
-          .withDeletedAt(DEFAULT_DELETED_AT)
-          .build();
+      TablePO.Builder builder =
+          TablePO.builder()
+              .withTableId(oldTablePO.getTableId())
+              .withTableName(newTable.name())
+              .withMetalakeId(oldTablePO.getMetalakeId())
+              .withCatalogId(oldTablePO.getCatalogId())
+              .withSchemaId(newSchemaId)
+              .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(newTable.auditInfo()))
+              .withCurrentVersion(currentVersion)
+              .withLastVersion(lastVersion)
+              .withDeletedAt(DEFAULT_DELETED_AT)
+              .withComment(newTable.comment())
+              .withProperties(
+                  newTable.properties() == null
+                      ? null
+                      : JsonUtils.anyFieldMapper().writeValueAsString(newTable.properties()))
+              .withIndexes(
+                  newTable.indexes() == null
+                      ? null
+                      : JsonUtils.anyFieldMapper()
+                          .writeValueAsString(DTOConverters.toDTOs(newTable.indexes())))
+              .withDistribution(
+                  newTable.distribution() == null
+                      ? null
+                      : JsonUtils.anyFieldMapper()
+                          .writeValueAsString(DTOConverters.toDTO(newTable.distribution())))
+              .withSortOrders(
+                  newTable.sortOrders() == null
+                      ? null
+                      : JsonUtils.anyFieldMapper()
+                          .writeValueAsString(DTOConverters.toDTOs(newTable.sortOrders())))
+              .withPartitions(
+                  newTable.partitioning() == null
+                      ? null
+                      : JsonUtils.anyFieldMapper()
+                          .writeValueAsString(DTOConverters.toDTOs(newTable.partitioning())))
+              .withFormat(
+                  newTable.properties() == null
+                      ? null
+                      : newTable.properties().getOrDefault(Table.PROPERTY_TABLE_FORMAT, null));
+
+      return builder.build();
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to serialize json object:", e);
     }
@@ -456,6 +516,14 @@ public class POConverters {
   public static TableEntity fromTableAndColumnPOs(
       TablePO tablePO, List<ColumnPO> columnPOs, Namespace namespace) {
     try {
+      Map<String, String> properties =
+          StringUtils.isBlank(tablePO.getProperties())
+              ? Maps.newHashMap()
+              : JsonUtils.anyFieldMapper().readValue(tablePO.getProperties(), Map.class);
+      if (StringUtils.isNotBlank(tablePO.getFormat())) {
+        properties.put(Table.PROPERTY_TABLE_FORMAT, tablePO.getFormat());
+      }
+
       return TableEntity.builder()
           .withId(tablePO.getTableId())
           .withName(tablePO.getTableName())
@@ -463,6 +531,32 @@ public class POConverters {
           .withColumns(fromColumnPOs(columnPOs))
           .withAuditInfo(
               JsonUtils.anyFieldMapper().readValue(tablePO.getAuditInfo(), AuditInfo.class))
+          .withDistribution(
+              StringUtils.isBlank(tablePO.getDistribution())
+                  ? null
+                  : DTOConverters.fromDTO(
+                      JsonUtils.anyFieldMapper()
+                          .readValue(tablePO.getDistribution(), DistributionDTO.class)))
+          .withSortOrders(
+              StringUtils.isBlank(tablePO.getSortOrders())
+                  ? null
+                  : DTOConverters.fromDTOs(
+                      JsonUtils.anyFieldMapper()
+                          .readValue(tablePO.getSortOrders(), SortOrderDTO[].class)))
+          .withIndexes(
+              StringUtils.isBlank(tablePO.getIndexes())
+                  ? null
+                  : DTOConverters.fromDTOs(
+                      JsonUtils.anyFieldMapper().readValue(tablePO.getIndexes(), IndexDTO[].class)))
+          // TODO add field partition, distribution and sort order;
+          .withPartitioning(
+              StringUtils.isBlank(tablePO.getPartitions())
+                  ? null
+                  : JsonUtils.anyFieldMapper()
+                      .readValue(tablePO.getPartitions(), Partitioning[].class))
+          .withComment(tablePO.getComment())
+          .withProperties(properties)
+          .withColumns(fromColumnPOs(columnPOs))
           .build();
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to deserialize json object:", e);
@@ -690,9 +784,7 @@ public class POConverters {
     try {
       PolicyContent oldContent =
           JsonUtils.anyFieldMapper()
-              .readValue(
-                  oldPolicyVersionPO.getContent(),
-                  Policy.BuiltInType.fromPolicyType(newPolicy.policyType()).contentClass());
+              .readValue(oldPolicyVersionPO.getContent(), newPolicy.policyType().contentClass());
       if (oldContent == null) {
         return newPolicy.content() != null;
       }
@@ -729,18 +821,8 @@ public class POConverters {
       return PolicyPO.builder()
           .withPolicyId(newPolicy.id())
           .withPolicyName(newPolicy.name())
-          .withPolicyType(newPolicy.policyType())
+          .withPolicyType(newPolicy.policyType().policyType())
           .withMetalakeId(oldPolicyPO.getMetalakeId())
-          .withInheritable(newPolicy.inheritable())
-          .withExclusive(newPolicy.exclusive())
-          .withSupportedObjectTypes(
-              JsonUtils.anyFieldMapper()
-                  .writeValueAsString(
-                      // Sort the supported object types to ensure consistent ordering
-                      newPolicy.supportedObjectTypes().stream()
-                          .map(Enum::name)
-                          .sorted()
-                          .collect(Collectors.toCollection(LinkedHashSet::new))))
           .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(newPolicy.auditInfo()))
           .withCurrentVersion(currentVersion)
           .withLastVersion(lastVersion)
@@ -1224,6 +1306,11 @@ public class POConverters {
               .readValue(securableObjectPO.getPrivilegeConditions(), List.class);
 
       List<Privilege> privileges = Lists.newArrayList();
+      Preconditions.checkArgument(
+          privilegeNames.size() == privilegeConditions.size(),
+          "Privilege names and conditions must have the same size, but got %s names and %s conditions",
+          privilegeNames.size(),
+          privilegeConditions.size());
       for (int index = 0; index < privilegeNames.size(); index++) {
         if (Privilege.Condition.ALLOW.name().equals(privilegeConditions.get(index))) {
           privileges.add(Privileges.allow(privilegeNames.get(index)));
@@ -1323,6 +1410,10 @@ public class POConverters {
     }
   }
 
+  public static List<TagEntity> fromTagPOs(List<TagPO> tagPOs, Namespace namespace) {
+    return tagPOs.stream().map(po -> fromTagPO(po, namespace)).collect(Collectors.toList());
+  }
+
   public static TagPO initializeTagPOWithVersion(TagEntity tagEntity, TagPO.Builder builder) {
     try {
       return builder
@@ -1387,31 +1478,27 @@ public class POConverters {
 
   public static PolicyEntity fromPolicyPO(PolicyPO policyPO, Namespace namespace) {
     try {
+      Policy.BuiltInType policyType = Policy.BuiltInType.fromPolicyType(policyPO.getPolicyType());
       return PolicyEntity.builder()
           .withId(policyPO.getPolicyId())
           .withName(policyPO.getPolicyName())
           .withNamespace(namespace)
-          .withPolicyType(policyPO.getPolicyType())
+          .withPolicyType(policyType)
           .withComment(policyPO.getPolicyVersionPO().getPolicyComment())
           .withEnabled(policyPO.getPolicyVersionPO().isEnabled())
-          .withExclusive(policyPO.isExclusive())
-          .withInheritable(policyPO.isInheritable())
-          .withSupportedObjectTypes(
-              JsonUtils.anyFieldMapper()
-                  .readValue(
-                      policyPO.getSupportedObjectTypes(),
-                      new TypeReference<Set<MetadataObject.Type>>() {}))
           .withContent(
               JsonUtils.anyFieldMapper()
-                  .readValue(
-                      policyPO.getPolicyVersionPO().getContent(),
-                      Policy.BuiltInType.fromPolicyType(policyPO.getPolicyType()).contentClass()))
+                  .readValue(policyPO.getPolicyVersionPO().getContent(), policyType.contentClass()))
           .withAuditInfo(
               JsonUtils.anyFieldMapper().readValue(policyPO.getAuditInfo(), AuditInfo.class))
           .build();
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to deserialize json object:", e);
     }
+  }
+
+  public static List<PolicyEntity> fromPolicyPOs(List<PolicyPO> policyPOs, Namespace namespace) {
+    return policyPOs.stream().map(po -> fromPolicyPO(po, namespace)).collect(Collectors.toList());
   }
 
   public static PolicyPO initializePolicyPOWithVersion(
@@ -1431,22 +1518,35 @@ public class POConverters {
       return builder
           .withPolicyId(policyEntity.id())
           .withPolicyName(policyEntity.name())
-          .withPolicyType(policyEntity.policyType())
-          .withInheritable(policyEntity.inheritable())
-          .withExclusive(policyEntity.exclusive())
-          .withSupportedObjectTypes(
-              JsonUtils.anyFieldMapper()
-                  .writeValueAsString(
-                      // Sort the supported object types to ensure consistent ordering
-                      policyEntity.supportedObjectTypes().stream()
-                          .map(Enum::name)
-                          .sorted()
-                          .collect(Collectors.toCollection(LinkedHashSet::new))))
+          .withPolicyType(policyEntity.policyType().policyType())
           .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(policyEntity.auditInfo()))
           .withCurrentVersion(INIT_VERSION)
           .withLastVersion(INIT_VERSION)
           .withDeletedAt(DEFAULT_DELETED_AT)
           .withPolicyVersionPO(policyVersionPO)
+          .build();
+    } catch (JsonProcessingException e) {
+      throw new RuntimeException("Failed to serialize json object:", e);
+    }
+  }
+
+  public static PolicyMetadataObjectRelPO initializePolicyMetadataObjectRelPOWithVersion(
+      Long policyId, Long metadataObjectId, String metadataObjectType) {
+    try {
+      AuditInfo auditInfo =
+          AuditInfo.builder()
+              .withCreator(PrincipalUtils.getCurrentPrincipal().getName())
+              .withCreateTime(Instant.now())
+              .build();
+
+      return PolicyMetadataObjectRelPO.builder()
+          .withPolicyId(policyId)
+          .withMetadataObjectId(metadataObjectId)
+          .withMetadataObjectType(metadataObjectType)
+          .withAuditInfo(JsonUtils.anyFieldMapper().writeValueAsString(auditInfo))
+          .withCurrentVersion(INIT_VERSION)
+          .withLastVersion(INIT_VERSION)
+          .withDeletedAt(DEFAULT_DELETED_AT)
           .build();
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to serialize json object:", e);
@@ -1497,6 +1597,10 @@ public class POConverters {
     } catch (JsonProcessingException e) {
       throw new RuntimeException("Failed to deserialize json object:", e);
     }
+  }
+
+  public static List<ModelEntity> fromModelPOs(List<ModelPO> modelPOs, Namespace namespace) {
+    return modelPOs.stream().map(po -> fromModelPO(po, namespace)).collect(Collectors.toList());
   }
 
   public static ModelPO initializeModelPO(ModelEntity modelEntity, ModelPO.Builder builder) {
@@ -1593,11 +1697,10 @@ public class POConverters {
           .withMetalakeId(oldModelVersionPO.getMetalakeId())
           .withCatalogId(oldModelVersionPO.getCatalogId())
           .withSchemaId(oldModelVersionPO.getSchemaId())
-          // TODO The modelVersionUriName and modelVersionUri here are not actually used.
-          // They are only used for occupying positions to avoid verification failures. They will
-          // be removed when the model version with multiple URIs is supported to be modified later
-          .withModelVersionUriName("uriName")
-          .withModelVersionUri("uri")
+          // The modelVersionUriName and modelVersionUri here are not actually used.
+          // They are only used for occupying positions to avoid verification failures.
+          .withModelVersionUriName(oldModelVersionPO.getModelVersionUriName())
+          .withModelVersionUri(oldModelVersionPO.getModelVersionUri())
           .withModelVersion(oldModelVersionPO.getModelVersion())
           .withModelVersionComment(newModelVersion.comment())
           .withModelVersionProperties(
@@ -1611,23 +1714,32 @@ public class POConverters {
   }
 
   /**
-   * Construct a new ModelVersionAliasRelPO object with the given alias.
+   * Construct a list of new {@link ModelVersionAliasRelPO} objects for the updated model version,
+   * one entry per alias in the new model version.
    *
-   * @param oldModelVersionAliasRelPOs The old ModelVersionAliasRelPOs object
+   * @param oldModelVersionAliasRelPOs The old ModelVersionAliasRelPOs list
    * @param newModelVersion The new {@link ModelVersionEntity} object
-   * @return The new ModelVersionAliasRelPO object
+   * @param modelId The DB ID of the model entity
+   * @return A list of new {@link ModelVersionAliasRelPO} objects, one per alias
    */
   public static List<ModelVersionAliasRelPO> updateModelVersionAliasRelPO(
-      List<ModelVersionAliasRelPO> oldModelVersionAliasRelPOs, ModelVersionEntity newModelVersion) {
+      List<ModelVersionAliasRelPO> oldModelVersionAliasRelPOs,
+      ModelVersionEntity newModelVersion,
+      Long modelId) {
 
     if (!oldModelVersionAliasRelPOs.isEmpty()) {
       ModelVersionAliasRelPO oldModelVersionAliasRelPO = oldModelVersionAliasRelPOs.get(0);
       return newModelVersion.aliases().stream()
-          .map(alias -> createAliasRelPO(oldModelVersionAliasRelPO, alias))
+          .map(
+              alias ->
+                  createAliasRelPO(
+                      oldModelVersionAliasRelPO.getModelId(),
+                      oldModelVersionAliasRelPO.getModelVersion(),
+                      alias))
           .collect(Collectors.toList());
     } else {
       return newModelVersion.aliases().stream()
-          .map(alias -> createAliasRelPO(newModelVersion, alias))
+          .map(alias -> createAliasRelPO(modelId, newModelVersion.version(), alias))
           .collect(Collectors.toList());
     }
   }
@@ -1678,21 +1790,11 @@ public class POConverters {
         .collect(Collectors.toList());
   }
 
-  private static ModelVersionAliasRelPO createAliasRelPO(
-      ModelVersionAliasRelPO oldModelVersionAliasRelPO, String alias) {
+  private static ModelVersionAliasRelPO createAliasRelPO(Long modelId, int version, String alias) {
     return ModelVersionAliasRelPO.builder()
-        .withModelVersion(oldModelVersionAliasRelPO.getModelVersion())
+        .withModelVersion(version)
         .withModelVersionAlias(alias)
-        .withModelId(oldModelVersionAliasRelPO.getModelId())
-        .withDeletedAt(DEFAULT_DELETED_AT)
-        .build();
-  }
-
-  private static ModelVersionAliasRelPO createAliasRelPO(ModelVersionEntity entity, String alias) {
-    return ModelVersionAliasRelPO.builder()
-        .withModelVersion(entity.version())
-        .withModelVersionAlias(alias)
-        .withModelId(entity.id())
+        .withModelId(modelId)
         .withDeletedAt(DEFAULT_DELETED_AT)
         .build();
   }

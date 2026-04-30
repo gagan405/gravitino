@@ -129,9 +129,6 @@ export const providers = [
       {
         key: 'warehouse',
         value: '',
-        required: true,
-        parentField: 'catalog-backend',
-        hide: ['rest'],
         description: 'Apache Iceberg catalog warehouse config'
       },
       {
@@ -259,6 +256,11 @@ export const providers = [
     ]
   },
   {
+    label: 'Lakehouse Generic',
+    value: 'lakehouse-generic',
+    defaultProps: []
+  },
+  {
     label: 'MySQL',
     value: 'jdbc-mysql',
     defaultProps: [
@@ -342,6 +344,34 @@ export const providers = [
       },
       {
         key: 'jdbc-database',
+        value: '',
+        required: true
+      }
+    ]
+  },
+  {
+    label: 'StarRocks',
+    value: 'jdbc-starrocks',
+    defaultProps: [
+      {
+        key: 'jdbc-driver',
+        value: '',
+        required: true,
+        description: 'e.g. com.mysql.jdbc.Driver'
+      },
+      {
+        key: 'jdbc-url',
+        value: '',
+        required: true,
+        description: 'e.g. jdbc:mysql://localhost:9030'
+      },
+      {
+        key: 'jdbc-user',
+        value: '',
+        required: true
+      },
+      {
+        key: 'jdbc-password',
         value: '',
         required: true
       }
@@ -532,6 +562,22 @@ const relationalColumnTypeMap = {
     'timestamp_tz',
     'varchar'
   ],
+  'jdbc-starrocks': [
+    'binary',
+    'boolean',
+    'byte',
+    'char',
+    'date',
+    'decimal',
+    'double',
+    'float',
+    'integer',
+    'long',
+    'short',
+    'string',
+    'timestamp',
+    'varchar'
+  ],
   'jdbc-doris': [
     'boolean',
     'byte',
@@ -565,6 +611,24 @@ const relationalColumnTypeMap = {
     'timestamp',
     'timestamp_tz',
     'varchar'
+  ],
+  'lakehouse-generic': [
+    'binary',
+    'boolean',
+    'byte',
+    'date',
+    'decimal',
+    'double',
+    'fixed',
+    'float',
+    'integer',
+    'interval_day',
+    'interval_year',
+    'long',
+    'short',
+    'string',
+    'time',
+    'timestamp'
   ],
   'jdbc-oceanbase': [
     'binary',
@@ -612,8 +676,15 @@ const relationalTablePropInfoMap = {
     allowDelete: true,
     allowAdd: true
   },
+  'jdbc-starrocks': {
+    reserved: [],
+    immutable: [],
+    allowDelete: true,
+    allowAdd: true
+  },
   'jdbc-doris': {
     reserved: [],
+    immutable: [],
     allowDelete: true,
     allowAdd: true
   },
@@ -669,6 +740,27 @@ const relationalTablePropInfoMap = {
     immutable: ['merge-engine', 'rowkind.field', 'sequence.field'],
     allowDelete: true,
     allowAdd: true
+  },
+  'lakehouse-generic': {
+    reserved: [],
+    immutable: ['format', 'location'],
+    allowDelete: true,
+    allowAdd: true,
+    defaultProps: [
+      {
+        key: 'location',
+        value: '',
+        required: false,
+        description: 'The storage location of the table. Required if not set in catalog or schema.'
+      },
+      {
+        key: 'format',
+        value: 'lance',
+        required: true,
+        description: "The table format. Currently only 'lance' is supported.",
+        disabled: true
+      }
+    ]
   }
 }
 

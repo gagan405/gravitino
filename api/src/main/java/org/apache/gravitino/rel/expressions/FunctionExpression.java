@@ -20,6 +20,7 @@ package org.apache.gravitino.rel.expressions;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.stream.Collectors;
 import org.apache.gravitino.annotation.Evolving;
 
 /**
@@ -50,10 +51,14 @@ public interface FunctionExpression extends Expression {
     return of(functionName, EMPTY_EXPRESSION);
   }
 
-  /** @return The transform function name. */
+  /**
+   * @return The transform function name.
+   */
   String functionName();
 
-  /** @return The arguments passed to the transform function. */
+  /**
+   * @return The arguments passed to the transform function.
+   */
   Expression[] arguments();
 
   @Override
@@ -81,13 +86,18 @@ public interface FunctionExpression extends Expression {
       return arguments;
     }
 
-    /** @return The string representation of the function expression. */
+    /**
+     * @return The string representation of the function expression.
+     */
     @Override
     public String toString() {
       if (arguments.length == 0) {
         return functionName + "()";
       }
-      return functionName + "(" + String.join(", ", Arrays.toString(arguments)) + ")";
+      return functionName
+          + Arrays.stream(arguments)
+              .map(Expression::toString)
+              .collect(Collectors.joining(", ", "(", ")"));
     }
 
     @Override

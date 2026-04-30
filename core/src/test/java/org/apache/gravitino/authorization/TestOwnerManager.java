@@ -67,9 +67,13 @@ import org.apache.gravitino.storage.RandomIdGenerator;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import org.mockito.Mockito;
 
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class TestOwnerManager {
   private static final String JDBC_STORE_PATH =
       "/tmp/gravitino_jdbc_entityStore_" + UUID.randomUUID().toString().replace("-", "");
@@ -111,6 +115,7 @@ public class TestOwnerManager {
     Mockito.when(config.get(Configs.CACHE_WEIGHER_ENABLED)).thenReturn(true);
     Mockito.when(config.get(Configs.CACHE_STATS_ENABLED)).thenReturn(false);
     Mockito.when(config.get(Configs.CACHE_IMPLEMENTATION)).thenReturn("caffeine");
+    Mockito.when(config.get(Configs.CACHE_LOCK_SEGMENTS)).thenReturn(16);
 
     Mockito.doReturn(100000L).when(config).get(TREE_LOCK_MAX_NODE_IN_MEMORY);
     Mockito.doReturn(1000L).when(config).get(TREE_LOCK_MIN_NODE_IN_MEMORY);
@@ -151,7 +156,7 @@ public class TestOwnerManager {
             .withName(GROUP)
             .withRoleNames(Collections.emptyList())
             .withRoleIds(Collections.emptyList())
-            .withNamespace(AuthorizationUtils.ofUserNamespace(METALAKE))
+            .withNamespace(AuthorizationUtils.ofGroupNamespace(METALAKE))
             .withAuditInfo(audit)
             .build();
     entityStore.put(groupEntity, false /* overwritten*/);
@@ -175,6 +180,7 @@ public class TestOwnerManager {
   }
 
   @Test
+  @Order(1)
   public void testOwner() {
     // Test no owner
     MetadataObject metalakeObject =
@@ -197,18 +203,44 @@ public class TestOwnerManager {
     Assertions.assertEquals(USER, owner.name());
     Assertions.assertEquals(Owner.Type.USER, owner.type());
 
-    // Test to set the group as the owner
-    Mockito.reset(authorizationPlugin);
-    ownerManager.setOwner(METALAKE, metalakeObject, GROUP, Owner.Type.GROUP);
-    Mockito.verify(authorizationPlugin).onOwnerSet(Mockito.any(), Mockito.any(), Mockito.any());
-
-    // Test not-existed metadata object
+    // Test not-existed metadata object when setting owner
     Assertions.assertThrows(
         NotFoundException.class,
-        () -> ownerManager.setOwner(METALAKE, notExistObject, GROUP, Owner.Type.GROUP));
+        () -> ownerManager.setOwner(METALAKE, notExistObject, USER, Owner.Type.USER));
+  }
 
-    owner = ownerManager.getOwner(METALAKE, metalakeObject).get();
+  @Test
+  @Order(2)
+  public void testGroupTypeOwner() {
+    MetadataObject metalakeObject =
+        MetadataObjects.of(Lists.newArrayList(METALAKE), MetadataObject.Type.METALAKE);
+
+    // Test to set the group as the owner
+    ownerManager.setOwner(METALAKE, metalakeObject, GROUP, Owner.Type.GROUP);
+    Mockito.verify(authorizationPlugin, Mockito.atLeastOnce())
+        .onOwnerSet(Mockito.any(), Mockito.any(), Mockito.any());
+
+    Owner owner = ownerManager.getOwner(METALAKE, metalakeObject).get();
     Assertions.assertEquals(GROUP, owner.name());
     Assertions.assertEquals(Owner.Type.GROUP, owner.type());
+
+    // Test replacing group owner with user owner
+    ownerManager.setOwner(METALAKE, metalakeObject, USER, Owner.Type.USER);
+    Owner replacedOwner = ownerManager.getOwner(METALAKE, metalakeObject).get();
+    Assertions.assertEquals(USER, replacedOwner.name());
+    Assertions.assertEquals(Owner.Type.USER, replacedOwner.type());
+  }
+
+  @Test
+  @Order(3)
+  public void testSetNonExistentGroupAsOwner() {
+    MetadataObject metalakeObject =
+        MetadataObjects.of(Lists.newArrayList(METALAKE), MetadataObject.Type.METALAKE);
+
+    Assertions.assertThrows(
+        NotFoundException.class,
+        () ->
+            ownerManager.setOwner(
+                METALAKE, metalakeObject, "non-existent-group", Owner.Type.GROUP));
   }
 }

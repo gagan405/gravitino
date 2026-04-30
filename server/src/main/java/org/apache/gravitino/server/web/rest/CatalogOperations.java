@@ -20,8 +20,6 @@ package org.apache.gravitino.server.web.rest;
 
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
-import java.util.Arrays;
-import java.util.stream.Collectors;
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.Consumes;
@@ -56,9 +54,10 @@ import org.apache.gravitino.dto.responses.DropResponse;
 import org.apache.gravitino.dto.responses.EntityListResponse;
 import org.apache.gravitino.dto.util.DTOConverters;
 import org.apache.gravitino.metrics.MetricNames;
-import org.apache.gravitino.server.authorization.MetadataFilterHelper;
+import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
+import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -74,9 +73,6 @@ public class CatalogOperations {
 
   private final CatalogDispatcher catalogDispatcher;
 
-  private static final String loadCatalogAuthorizationExpression =
-      "ANY_USE_CATALOG || ANY(OWNER, METALAKE, CATALOG)";
-
   @Context private HttpServletRequest httpRequest;
 
   @Inject
@@ -88,8 +84,10 @@ public class CatalogOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "list-catalog." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "list-catalog", absolute = true)
+  @AuthorizationExpression(expression = "")
   public Response listCatalogs(
-      @PathParam("metalake") String metalake,
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
       @QueryParam("details") @DefaultValue("false") boolean verbose) {
     LOG.info(
         "Received list catalog {} request for metalake: {}, ",
@@ -104,32 +102,22 @@ public class CatalogOperations {
             if (verbose) {
               Catalog[] catalogs = catalogDispatcher.listCatalogsInfo(catalogNS);
               catalogs =
-                  Arrays.stream(catalogs)
-                      .filter(
-                          catalog -> {
-                            NameIdentifier[] nameIdentifiers =
-                                new NameIdentifier[] {
-                                  NameIdentifierUtil.ofCatalog(metalake, catalog.name())
-                                };
-                            return MetadataFilterHelper.filterByExpression(
-                                        metalake,
-                                        loadCatalogAuthorizationExpression,
-                                        Entity.EntityType.CATALOG,
-                                        nameIdentifiers)
-                                    .length
-                                > 0;
-                          })
-                      .collect(Collectors.toList())
-                      .toArray(new Catalog[0]);
+                  MetadataAuthzHelper.filterByExpression(
+                      metalake,
+                      AuthorizationExpressionConstants.LOAD_CATALOG_AUTHORIZATION_EXPRESSION,
+                      Entity.EntityType.CATALOG,
+                      catalogs,
+                      (catalogEntity) ->
+                          NameIdentifierUtil.ofCatalog(metalake, catalogEntity.name()));
               Response response = Utils.ok(new CatalogListResponse(DTOConverters.toDTOs(catalogs)));
               LOG.info("List {} catalogs info under metalake: {}", catalogs.length, metalake);
               return response;
             } else {
               NameIdentifier[] idents = catalogDispatcher.listCatalogs(catalogNS);
               idents =
-                  MetadataFilterHelper.filterByExpression(
+                  MetadataAuthzHelper.filterByExpression(
                       metalake,
-                      loadCatalogAuthorizationExpression,
+                      AuthorizationExpressionConstants.LOAD_CATALOG_AUTHORIZATION_EXPRESSION,
                       Entity.EntityType.CATALOG,
                       idents);
               Response response = Utils.ok(new EntityListResponse(idents));
@@ -148,7 +136,7 @@ public class CatalogOperations {
   @ResponseMetered(name = "create-catalog", absolute = true)
   @AuthorizationExpression(
       expression = "METALAKE::CREATE_CATALOG || METALAKE::OWNER",
-      accessMetadataType = MetadataObject.Type.CATALOG)
+      accessMetadataType = MetadataObject.Type.METALAKE)
   public Response createCatalog(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
           String metalake,
@@ -182,6 +170,9 @@ public class CatalogOperations {
   @Path("testConnection")
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "test-connection." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
+  @AuthorizationExpression(
+      expression = "METALAKE::CREATE_CATALOG || METALAKE::OWNER",
+      accessMetadataType = MetadataObject.Type.METALAKE)
   @ResponseMetered(name = "test-connection", absolute = true)
   public Response testConnection(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -227,12 +218,15 @@ public class CatalogOperations {
           String catalogName,
       CatalogSetRequest request) {
     LOG.info("Received set request for catalog: {}.{}", metalake, catalogName);
+
+    OperationType op = request.isInUse() ? OperationType.ENABLE : OperationType.DISABLE;
+
     try {
       return Utils.doAs(
           httpRequest,
           () -> {
             NameIdentifier ident = NameIdentifierUtil.ofCatalog(metalake, catalogName);
-            if (request.isInUse()) {
+            if (op == OperationType.ENABLE) {
               catalogDispatcher.enableCatalog(ident);
             } else {
               catalogDispatcher.disableCatalog(ident);
@@ -253,8 +247,7 @@ public class CatalogOperations {
           request.isInUse() ? "enable" : "disable",
           metalake,
           catalogName);
-      return ExceptionHandlers.handleCatalogException(
-          OperationType.ENABLE, catalogName, metalake, e);
+      return ExceptionHandlers.handleCatalogException(op, catalogName, metalake, e);
     }
   }
 
@@ -345,9 +338,10 @@ public class CatalogOperations {
             boolean dropped = catalogDispatcher.dropCatalog(ident, force);
             if (!dropped) {
               LOG.warn("Failed to drop catalog {} under metalake {}", catalogName, metalakeName);
+            } else {
+              LOG.info("Catalog dropped: {}.{}", metalakeName, catalogName);
             }
             Response response = Utils.ok(new DropResponse(dropped));
-            LOG.info("Catalog dropped: {}.{}", metalakeName, catalogName);
             return response;
           });
     } catch (Exception e) {

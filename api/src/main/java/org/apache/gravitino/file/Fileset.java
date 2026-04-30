@@ -26,6 +26,7 @@ import org.apache.gravitino.Namespace;
 import org.apache.gravitino.annotation.Evolving;
 import org.apache.gravitino.authorization.SupportsRoles;
 import org.apache.gravitino.credential.SupportsCredentials;
+import org.apache.gravitino.policy.SupportsPolicies;
 import org.apache.gravitino.tag.SupportsTags;
 
 /**
@@ -88,16 +89,22 @@ public interface Fileset extends Auditable {
     EXTERNAL
   }
 
-  /** @return Name of the fileset object. */
+  /**
+   * @return Name of the fileset object.
+   */
   String name();
 
-  /** @return The comment of the fileset object. Null is returned if no comment is set. */
+  /**
+   * @return The comment of the fileset object. Null is returned if no comment is set.
+   */
   @Nullable
   default String comment() {
     return null;
   }
 
-  /** @return The type of the fileset object. */
+  /**
+   * @return The type of the fileset object.
+   */
   Type type();
 
   /**
@@ -240,6 +247,14 @@ public interface Fileset extends Auditable {
    */
   default SupportsTags supportsTags() {
     throw new UnsupportedOperationException("Fileset does not support tag operations.");
+  }
+
+  /**
+   * @return The {@link SupportsPolicies} if the fileset supports policy operations.
+   * @throws UnsupportedOperationException If the fileset does not support policy operations.
+   */
+  default SupportsPolicies supportsPolicies() {
+    throw new UnsupportedOperationException("Fileset does not support policy operations.");
   }
 
   /**

@@ -79,10 +79,6 @@ public class CatalogHookDispatcher implements CatalogDispatcher {
       String comment,
       Map<String, String> properties)
       throws NoSuchMetalakeException, CatalogAlreadyExistsException {
-    // Check whether the current user exists or not
-    AuthorizationUtils.checkCurrentUser(
-        ident.namespace().level(0), PrincipalUtils.getCurrentUserName());
-
     Catalog catalog = dispatcher.createCatalog(ident, type, provider, comment, properties);
 
     try {
@@ -102,9 +98,17 @@ public class CatalogHookDispatcher implements CatalogDispatcher {
         futureGrantManager.grantNewlyCreatedCatalog(
             ident.namespace().level(0), (BaseCatalog) catalog);
       }
-    } catch (Exception e) {
-      LOG.warn("Fail to execute the post hook operations, rollback the catalog " + ident, e);
-      dispatcher.dropCatalog(ident, true);
+    } catch (Exception postHookException) {
+      LOG.warn(
+          "Fail to execute the post hook operations, rollback the catalog " + ident,
+          postHookException);
+      try {
+        dispatcher.dropCatalog(ident, true);
+      } catch (Exception rollbackException) {
+        LOG.warn("Fail to rollback the catalog during the post hook", rollbackException);
+        postHookException.addSuppressed(rollbackException);
+      }
+      throw postHookException;
     }
 
     return catalog;

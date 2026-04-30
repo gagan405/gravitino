@@ -99,11 +99,15 @@ public interface TableUpdateRequest extends RESTRequest {
   /** Represents a request to rename a table. */
   @EqualsAndHashCode
   @ToString
+  @Getter
   class RenameTableRequest implements TableUpdateRequest {
 
-    @Getter
     @JsonProperty("newName")
     private final String newName;
+
+    @JsonProperty("newSchemaName")
+    @Nullable
+    private final String newSchemaName;
 
     /**
      * Constructor for RenameTableRequest.
@@ -111,12 +115,23 @@ public interface TableUpdateRequest extends RESTRequest {
      * @param newName the new name of the table
      */
     public RenameTableRequest(String newName) {
-      this.newName = newName;
+      this(newName, null);
     }
 
     /** Default constructor for Jackson deserialization. */
     public RenameTableRequest() {
       this(null);
+    }
+
+    /**
+     * Constructor for RenameTableRequest.
+     *
+     * @param newName the new name of the table
+     * @param newSchemaName the new schema name of the table, null if not changing schema
+     */
+    public RenameTableRequest(String newName, @Nullable String newSchemaName) {
+      this.newName = newName;
+      this.newSchemaName = newSchemaName;
     }
 
     /**
@@ -137,7 +152,7 @@ public interface TableUpdateRequest extends RESTRequest {
      */
     @Override
     public TableChange tableChange() {
-      return TableChange.rename(newName);
+      return TableChange.rename(newName, newSchemaName);
     }
   }
 
@@ -265,7 +280,9 @@ public interface TableUpdateRequest extends RESTRequest {
           StringUtils.isNotBlank(property), "\"property\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.removeProperty(property);
@@ -387,7 +404,9 @@ public interface TableUpdateRequest extends RESTRequest {
           dataType != null, "\"type\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.addColumn(
@@ -441,7 +460,9 @@ public interface TableUpdateRequest extends RESTRequest {
           "\"newFieldName\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.renameColumn(oldFieldName, newFieldName);
@@ -496,7 +517,9 @@ public interface TableUpdateRequest extends RESTRequest {
           "\"newDefaultValue\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.updateColumnDefaultValue(fieldName, newDefaultValue);
@@ -550,7 +573,9 @@ public interface TableUpdateRequest extends RESTRequest {
           newType != null, "\"newType\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.updateColumnType(fieldName, newType);
@@ -598,12 +623,11 @@ public interface TableUpdateRequest extends RESTRequest {
               && fieldName.length > 0
               && Arrays.stream(fieldName).allMatch(StringUtils::isNotBlank),
           "\"fieldName\" field is required and cannot be empty");
-      Preconditions.checkArgument(
-          StringUtils.isNotBlank(newComment),
-          "\"newComment\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.updateColumnComment(fieldName, newComment);
@@ -658,7 +682,9 @@ public interface TableUpdateRequest extends RESTRequest {
           newPosition != null, "\"newPosition\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.updateColumnPosition(fieldName, newPosition);
@@ -762,7 +788,9 @@ public interface TableUpdateRequest extends RESTRequest {
           "\"fieldName\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.deleteColumn(fieldName, ifExists);
@@ -800,21 +828,26 @@ public interface TableUpdateRequest extends RESTRequest {
      */
     @Override
     public void validate() throws IllegalArgumentException {
-      Preconditions.checkNotNull(index, "Index cannot be null");
+      Preconditions.checkArgument(index != null, "Index cannot be null");
       Preconditions.checkArgument(index.type() != null, "Index type cannot be null");
       Preconditions.checkArgument(
           index.fieldNames() != null && index.fieldNames().length > 0,
           "The index must be set with corresponding column names");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.addIndex(index.type(), index.name(), index.fieldNames());
     }
   }
 
-  /** Represents a request to delete an index from a table. */
+  /**
+   * Represents a request to delete an index from a table. If `ifExists` is null, it will be treated
+   * as false, which means the request will fail if the index does not exist.
+   */
   @EqualsAndHashCode
   @ToString
   class DeleteTableIndexRequest implements TableUpdateRequest {
@@ -822,8 +855,8 @@ public interface TableUpdateRequest extends RESTRequest {
     @JsonProperty("name")
     private String name;
 
-    @JsonProperty("ifExists")
-    private Boolean ifExists;
+    @JsonProperty(value = "ifExists", defaultValue = "false")
+    private boolean ifExists;
 
     /** Default constructor for Jackson deserialization. */
     public DeleteTableIndexRequest() {}
@@ -836,7 +869,7 @@ public interface TableUpdateRequest extends RESTRequest {
      */
     public DeleteTableIndexRequest(String name, Boolean ifExists) {
       this.name = name;
-      this.ifExists = ifExists;
+      this.ifExists = ifExists != null && ifExists;
     }
 
     /**
@@ -846,10 +879,12 @@ public interface TableUpdateRequest extends RESTRequest {
      */
     @Override
     public void validate() throws IllegalArgumentException {
-      Preconditions.checkNotNull(name, "Index name cannot be null");
+      Preconditions.checkArgument(name != null, "Index name cannot be null");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.deleteIndex(name, ifExists);
@@ -899,7 +934,9 @@ public interface TableUpdateRequest extends RESTRequest {
           "\"fieldName\" field is required and cannot be empty");
     }
 
-    /** @return An instance of TableChange. */
+    /**
+     * @return An instance of TableChange.
+     */
     @Override
     public TableChange tableChange() {
       return TableChange.updateColumnAutoIncrement(fieldName, autoIncrement);

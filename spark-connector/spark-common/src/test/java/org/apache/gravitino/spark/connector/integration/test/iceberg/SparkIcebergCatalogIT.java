@@ -62,6 +62,7 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -121,11 +122,6 @@ public abstract class SparkIcebergCatalogIT extends SparkCommonIT {
 
   @Override
   protected boolean supportsUpdateColumnPosition() {
-    return true;
-  }
-
-  @Override
-  protected boolean supportListTable() {
     return true;
   }
 
@@ -832,7 +828,9 @@ public abstract class SparkIcebergCatalogIT extends SparkCommonIT {
                     getCatalogName(), fullTableName))
             .collectAsList();
     Assertions.assertEquals(1, callResult.size());
-    Assertions.assertEquals(2, callResult.get(0).getInt(0));
+    int rewrite_delete_files = callResult.get(0).getInt(0);
+    // rewrite delete files is 1 in Iceberg 1.9
+    Assertions.assertTrue(rewrite_delete_files == 1 || rewrite_delete_files == 2);
     Assertions.assertEquals(1, callResult.get(0).getInt(1));
   }
 
@@ -1111,7 +1109,11 @@ public abstract class SparkIcebergCatalogIT extends SparkCommonIT {
     icebergTable.refresh();
     tableInfo = getTableInfo(tableName);
     tableProperties = tableInfo.getTableProperties();
-    Assertions.assertEquals("none", tableProperties.get(ICEBERG_WRITE_DISTRIBUTION_MODE));
+    // After https://github.com/apache/iceberg/pull/10774/, distribution mode is not changed for
+    // local sort order
+    String distributionMode = tableProperties.get(ICEBERG_WRITE_DISTRIBUTION_MODE);
+    Assertions.assertTrue(
+        "none".equalsIgnoreCase(distributionMode) || "range".equalsIgnoreCase(distributionMode));
     Assertions.assertEquals(
         "id DESC NULLS LAST", tableProperties.get(IcebergPropertiesConstants.ICEBERG_SORT_ORDER));
     sortOrder =
@@ -1270,5 +1272,50 @@ public abstract class SparkIcebergCatalogIT extends SparkCommonIT {
         boolean isPartitionedTable, int formatVersion, String writeMode) {
       return new IcebergTableWriteProperties(isPartitionedTable, formatVersion, writeMode);
     }
+  }
+
+  @Test
+  @EnabledIf("supportsFunction")
+  void testListFunctionsWithIcebergBuiltins() {
+    // Test Gravitino function listing
+    Set<String> gravitinoFunctions = listUserFunctions(functionSchemaName);
+    Assertions.assertTrue(
+        gravitinoFunctions.contains(
+            String.join(".", getCatalogName(), functionSchemaName, functionName)));
+
+    // Non-Spark function should NOT be listed
+    Assertions.assertFalse(
+        gravitinoFunctions.contains(
+            String.join(".", getCatalogName(), functionSchemaName, nonSparkFunctionName)));
+
+    // Test Iceberg built-in functions are also listed
+    Set<String> systemFunctions = listUserFunctions("system");
+    Assertions.assertTrue(
+        systemFunctions.stream().anyMatch(f -> f.contains("iceberg_version")),
+        "Iceberg built-in function 'iceberg_version' should be listed");
+    Assertions.assertTrue(
+        systemFunctions.stream().anyMatch(f -> f.contains("bucket")),
+        "Iceberg built-in function 'bucket' should be listed");
+  }
+
+  @Test
+  @EnabledIf("supportsFunction")
+  void testCallUDFAndIcebergBuiltins() {
+    // Test Gravitino UDF
+    List<String> gravitinoUdfResult =
+        getQueryData(String.format("SELECT %s.%s('abc')", functionSchemaName, functionName));
+    Assertions.assertEquals(1, gravitinoUdfResult.size());
+    Assertions.assertEquals("3", gravitinoUdfResult.get(0));
+
+    // Test Iceberg built-in functions can be called
+    List<String> icebergVersionResult =
+        getQueryData(String.format("SELECT %s.system.iceberg_version()", getCatalogName()));
+    Assertions.assertEquals(1, icebergVersionResult.size());
+    Assertions.assertFalse(icebergVersionResult.get(0).isEmpty());
+
+    List<String> bucketResult =
+        getQueryData(String.format("SELECT %s.system.bucket(2, 100)", getCatalogName()));
+    Assertions.assertEquals(1, bucketResult.size());
+    Assertions.assertEquals("0", bucketResult.get(0));
   }
 }

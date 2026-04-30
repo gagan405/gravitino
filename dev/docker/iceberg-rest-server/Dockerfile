@@ -16,14 +16,23 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-FROM openjdk:17-jdk-buster
+FROM eclipse-temurin:17.0.16_8-jdk-jammy
 
 LABEL maintainer="dev@gravitino.apache.org"
 
-WORKDIR /root/gravitino-iceberg-rest-server
+RUN apt-get update && apt-get install -y \
+    python-is-python3
 
-COPY packages/gravitino-iceberg-rest-server /root/gravitino-iceberg-rest-server
+WORKDIR /opt/gravitino-iceberg-rest-server
+
+COPY packages/gravitino-iceberg-rest-server /opt/gravitino-iceberg-rest-server
+
+RUN chmod -R g+rwX /opt/gravitino-iceberg-rest-server \
+    && chmod +x /opt/gravitino-iceberg-rest-server/bin/start-iceberg-rest-server.sh \
+    && useradd -u 1000 -g 0 -M -s /sbin/nologin gravitino
 
 EXPOSE 9001
 
-ENTRYPOINT ["/bin/bash", "/root/gravitino-iceberg-rest-server/bin/start-iceberg-rest-server.sh"]
+USER 1000
+
+ENTRYPOINT ["/bin/bash", "/opt/gravitino-iceberg-rest-server/bin/start-iceberg-rest-server.sh"]

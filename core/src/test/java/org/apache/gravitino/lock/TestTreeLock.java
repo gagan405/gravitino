@@ -26,6 +26,7 @@ import static org.mockito.Mockito.doThrow;
 
 import java.util.Arrays;
 import java.util.List;
+import org.apache.gravitino.NameIdentifier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -101,5 +102,25 @@ class TestTreeLock {
     // Verify that the second and third nodes were not unlocked
     Mockito.verify(mockNode2, Mockito.never()).unlock(Mockito.any());
     Mockito.verify(mockNode3, Mockito.never()).unlock(Mockito.any());
+  }
+
+  @Test
+  void testDoubleUnlockThrows() {
+    lock.lock(LockType.READ);
+    lock.unlock();
+    assertThrows(IllegalStateException.class, () -> lock.unlock());
+  }
+
+  @Test
+  void testUnlockWithMissingHoldingTimestamp() {
+    TreeLockNode rootNode = new TreeLockNode("root");
+    TreeLockNode childNode = rootNode.getOrCreateChild("child").getLeft();
+    TreeLock treeLock =
+        new TreeLock(Arrays.asList(rootNode, childNode), NameIdentifier.of("root", "child"));
+
+    treeLock.lock(LockType.WRITE);
+    childNode.getHoldingThreadTimestamp().clear();
+
+    assertDoesNotThrow(treeLock::unlock);
   }
 }

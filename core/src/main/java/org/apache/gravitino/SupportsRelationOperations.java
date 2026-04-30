@@ -20,6 +20,7 @@ package org.apache.gravitino;
 
 import java.io.IOException;
 import java.util.List;
+import org.apache.gravitino.exceptions.NoSuchEntityException;
 
 /**
  * This is an extended interface. This is mainly used for strengthen the ability of querying
@@ -37,10 +38,10 @@ public interface SupportsRelationOperations {
     ROLE_USER_REL,
     /** Role and group relationship */
     ROLE_GROUP_REL,
-    /** Job template and job relationship */
-    JOB_TEMPLATE_JOB_REL,
     /** Policy and metadata object relationship */
     POLICY_METADATA_OBJECT_REL,
+    /** Metadata object to tag relationship */
+    TAG_METADATA_OBJECT_REL,
   }
 
   /**
@@ -49,7 +50,7 @@ public interface SupportsRelationOperations {
    * @param <E> The type of entities returned.
    * @param relType The type of relation.
    * @param nameIdentifier The given entity identifier.
-   * @param identType The given entity type.
+   * @param identType The entity type of parameter nameIdentifier represents.
    * @return The list of entities
    * @throws IOException When occurs storage issues, it will throw IOException.
    */
@@ -64,17 +65,85 @@ public interface SupportsRelationOperations {
    * @param <E> the type of entities returned.
    * @param relType The type of relation.
    * @param nameIdentifier The given entity identifier
-   * @param identType The given entity type.
+   * @param identType The entity type of parameter nameIdentifier represents.
    * @param allFields Some fields may have a relatively high acquisition cost, EntityStore provide
    *     an optional setting to avoid fetching these high-cost fields to improve the performance. If
    *     true, the method will fetch all the fields, Otherwise, the method will fetch all the fields
    *     except for high-cost fields.
    * @return The list of entities
    * @throws IOException When occurs storage issues, it will throw IOException.
+   *     <pre>
+   *  Let's see an example to illustrate how this method works.
+   *  If we want to list all the users who have a specific role, we can use this method as follows:
+   *
+   *    listEntitiesByRelation(ROLE_USER_REL, name_identifier_of_role, EntityType.ROLE);
+   *
+   *  This will return a list of User entities that are associated with the specified role.
+   *  Similarly, if we want to list all roles a user has, we can call:
+   *
+   *  listEntitiesByRelation(ROLE_USER_REL, name_identifier_of_user, EntityType.USER);
+   *
+   *  That is to say, this method is versatile and can be used to navigate relationships in both
+   *  directions, the start entity is determined by the identType and nameIdentifier parameters.
+   *  The end entity type is determined by the relType parameter and start entity.
+   * </pre>
    */
   <E extends Entity & HasIdentifier> List<E> listEntitiesByRelation(
       Type relType, NameIdentifier nameIdentifier, Entity.EntityType identType, boolean allFields)
       throws IOException;
+
+  /**
+   * Retrieves the relations for a batch of source entities in a single call.
+   *
+   * <p>This is the batch counterpart of {@link #listEntitiesByRelation}. Instead of issuing one
+   * query per source entity, callers can supply a list of identifiers and receive all matching
+   * {@link RelationalEntity} objects in one round-trip to the backend.
+   *
+   * <p>For example, to fetch the owners for a collection of tables in one call:
+   *
+   * <pre>
+   *   batchListEntitiesByRelation(OWNER_REL, tableIdentifiers, EntityType.TABLE);
+   * </pre>
+   *
+   * <p>Each returned {@link RelationalEntity} carries the source identifier, source entity type,
+   * and the resolved target entity, allowing callers to correlate results back to their inputs.
+   * Source identifiers that have no related entity will produce no {@link RelationalEntity} entry
+   * in the result; they will not cause an error.
+   *
+   * @param relType The type of relation to query.
+   * @param nameIdentifiers The list of source entity identifiers to look up relations for.
+   * @param identType The entity type that each element in {@code nameIdentifiers} represents.
+   * @return A list of {@link RelationalEntity} objects, one per (source, target) pair found. May be
+   *     empty but never null.
+   * @throws IOException If a storage-related error occurs during the batch query.
+   */
+  List<RelationalEntity<?>> batchListEntitiesByRelation(
+      Type relType, List<NameIdentifier> nameIdentifiers, Entity.EntityType identType)
+      throws IOException;
+
+  /**
+   * Get a specific entity that is related to a given source entity.
+   *
+   * <p>For example, this can be used to get a specific policy that is directly associated with a
+   * metadata object.
+   *
+   * @param <E> The type of the entity to be returned.
+   * @param relType The type of relation.
+   * @param srcIdentifier The identifier of the source entity in the relation (e.g., a metadata
+   *     object).
+   * @param srcType The type of the source entity.
+   * @param destEntityIdent The identifier of the target entity to retrieve (e.g., a policy).
+   * @return The specific entity that is related to the source entity.
+   * @throws IOException If a storage-related error occurs.
+   * @throws NoSuchEntityException If the source entity or the target related entity does not exist,
+   *     or if the relation does not exist.
+   */
+  <E extends Entity & HasIdentifier> E getEntityByRelation(
+      Type relType,
+      NameIdentifier srcIdentifier,
+      Entity.EntityType srcType,
+      NameIdentifier destEntityIdent)
+      throws IOException, NoSuchEntityException;
 
   /**
    * insert a relation between two entities
@@ -95,4 +164,32 @@ public interface SupportsRelationOperations {
       Entity.EntityType dstType,
       boolean override)
       throws IOException;
+
+  /**
+   * Updates the relations for a given entity by adding a set of new relations and removing another
+   * set of relations.
+   *
+   * @param <E> The type of the entity returned in the list, which represents the final state of
+   *     related entities.
+   * @param relType The type of relation to update.
+   * @param srcEntityIdent The identifier of the source entity whose relations are being updated.
+   * @param srcEntityType The type of the source entity, which is the entity whose relations are
+   *     being updated.
+   * @param destEntitiesToAdd An array of identifiers for entities to be associated with.
+   * @param destEntitiesToRemove An array of identifiers for entities to be disassociated from.
+   * @return A list of entities that are related to the given entity after the update.
+   * @throws IOException If a storage-related error occurs.
+   * @throws NoSuchEntityException If any of the specified entities does not exist.
+   * @throws EntityAlreadyExistsException If a relation to be added already exists.
+   */
+  default <E extends Entity & HasIdentifier> List<E> updateEntityRelations(
+      Type relType,
+      NameIdentifier srcEntityIdent,
+      Entity.EntityType srcEntityType,
+      NameIdentifier[] destEntitiesToAdd,
+      NameIdentifier[] destEntitiesToRemove)
+      throws IOException, NoSuchEntityException, EntityAlreadyExistsException {
+    throw new UnsupportedOperationException(
+        "updateEntityRelations is not supported by this implementation");
+  }
 }

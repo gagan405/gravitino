@@ -25,54 +25,41 @@ plugins {
 }
 
 dependencies {
-  implementation(project(":api")) {
-    exclude(group = "*")
-  }
+  compileOnly(project(":api"))
+  compileOnly(project(":common"))
+  compileOnly(project(":core"))
+
+  compileOnly(libs.guava)
+
   implementation(project(":catalogs:catalog-common")) {
     exclude(group = "*")
   }
   implementation(project(":catalogs:hadoop-common")) {
     exclude(group = "*")
   }
-  implementation(project(":common")) {
-    exclude(group = "*")
-  }
-  implementation(project(":core")) {
-    exclude(group = "*")
-  }
+
   implementation(libs.caffeine)
-  implementation(libs.commons.lang3)
+  implementation(libs.cglib)
   implementation(libs.commons.io)
+  implementation(libs.commons.lang3)
   implementation(libs.hadoop3.client.api)
   implementation(libs.hadoop3.client.runtime)
-  implementation(libs.hadoop3.hdfs) {
-    exclude("com.sun.jersey")
-    exclude("javax.servlet", "servlet-api")
-    exclude("com.google.guava", "guava")
-    exclude("commons-io", "commons-io")
-    exclude("org.eclipse.jetty", "*")
-    exclude("io.netty")
-    exclude("org.fusesource.leveldbjni")
-    // Exclude `protobuf-java` 2.5.0 to avoid conflict with a higher version of `protobuf-java`
-    // in the authorization module. The reason is that the class loader of `catalog-hadoop` is the
-    // parent of the class loader of the authorization module, so the class loader of `catalog-hadoop`
-    // will load the class `protobuf-java` 2.5.0 first, which will cause the authorization module to
-    // fail to load the class `protobuf-java` 3.15.8.
-    exclude("com.google.protobuf", "protobuf-java")
-  }
+  implementation(libs.metrics.caffeine)
+  implementation(libs.metrics.core)
   implementation(libs.slf4j.api)
-  implementation(libs.awaitility)
 
-  compileOnly(libs.guava)
-
-  testImplementation(project(":clients:client-java"))
-  testImplementation(project(":bundles:aws-bundle", configuration = "shadow"))
-  testImplementation(project(":bundles:gcp-bundle", configuration = "shadow"))
+  testImplementation(project(":api"))
   testImplementation(project(":bundles:aliyun-bundle", configuration = "shadow"))
+  testImplementation(project(":bundles:aws-bundle", configuration = "shadow"))
   testImplementation(project(":bundles:azure-bundle", configuration = "shadow"))
+  testImplementation(project(":bundles:gcp-bundle", configuration = "shadow"))
+  testImplementation(project(":clients:client-java"))
+  testImplementation(project(":common"))
+  testImplementation(project(":core"))
   testImplementation(project(":integration-test-common", "testArtifacts"))
   testImplementation(project(":server"))
   testImplementation(project(":server-common"))
+  testImplementation(libs.awaitility)
   testImplementation(libs.bundles.log4j)
   testImplementation(libs.hadoop3.gcs)
   testImplementation(libs.hadoop3.minicluster)
@@ -90,7 +77,7 @@ dependencies {
 }
 
 tasks {
-  val runtimeJars by registering(Copy::class) {
+  register("runtimeJars", Copy::class) {
     from(configurations.runtimeClasspath)
     into("build/libs")
   }
@@ -100,6 +87,7 @@ tasks {
     from("build/libs") {
       exclude("slf4j-*.jar")
       exclude("guava-*.jar")
+      exclude("error_prone_annotations-*.jar")
       exclude("curator-*.jar")
       exclude("netty-*.jar")
       exclude("snappy-*.jar")

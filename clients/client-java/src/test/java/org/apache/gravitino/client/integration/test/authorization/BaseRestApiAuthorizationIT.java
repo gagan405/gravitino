@@ -17,18 +17,19 @@
 
 package org.apache.gravitino.client.integration.test.authorization;
 
+import com.google.common.collect.ImmutableMap;
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.HashMap;
 import org.apache.gravitino.Configs;
 import org.apache.gravitino.client.GravitinoAdminClient;
 import org.apache.gravitino.client.GravitinoMetalake;
 import org.apache.gravitino.integration.test.util.BaseIT;
-import org.apache.gravitino.server.authorization.jcasbin.JcasbinAuthorizer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
 
 public class BaseRestApiAuthorizationIT extends BaseIT {
 
@@ -43,6 +44,9 @@ public class BaseRestApiAuthorizationIT extends BaseIT {
 
   private static final Logger LOG = LoggerFactory.getLogger(BaseRestApiAuthorizationIT.class);
 
+  /** Mock a test staging directory for job test. */
+  protected static File testStagingDir;
+
   @BeforeAll
   @Override
   public void startIntegrationTest() throws Exception {
@@ -53,8 +57,6 @@ public class BaseRestApiAuthorizationIT extends BaseIT {
             USER,
             Configs.ENABLE_AUTHORIZATION.getKey(),
             "true",
-            Configs.AUTHORIZATION_IMPL.getKey(),
-            JcasbinAuthorizer.class.getCanonicalName(),
             Configs.CACHE_ENABLED.getKey(),
             "false",
             Configs.AUTHENTICATORS.getKey(),
@@ -87,5 +89,63 @@ public class BaseRestApiAuthorizationIT extends BaseIT {
       LOG.error("Exception in closing CloseableGroup", e);
     }
     super.stopIntegrationTest();
+  }
+
+  /**
+   * Generate a test entry script for job operation test
+   *
+   * @return the path of the entry script
+   */
+  protected static String generateTestEntryScript() {
+    String content =
+        "#!/bin/bash\n"
+            + "echo \"starting test job\"\n\n"
+            + "bin=\"$(dirname \"${BASH_SOURCE-$0}\")\"\n"
+            + "bin=\"$(cd \"${bin}\">/dev/null; pwd)\"\n\n"
+            + ". \"${bin}/common.sh\"\n\n"
+            + "sleep 3\n\n"
+            + "JOB_NAME=\"test_job-$(date +%s)-$1\"\n\n"
+            + "echo \"Submitting job with name: $JOB_NAME\"\n\n"
+            + "echo \"$1\"\n\n"
+            + "echo \"$2\"\n\n"
+            + "echo \"$ENV_VAR\"\n\n"
+            + "if [[ \"$2\" == \"success\" ]]; then\n"
+            + "  exit 0\n"
+            + "elif [[ \"$2\" == \"fail\" ]]; then\n"
+            + "  exit 1\n"
+            + "else\n"
+            + "  exit 2\n"
+            + "fi\n";
+
+    try {
+      File scriptFile = new File(testStagingDir, "test-job.sh");
+      Files.writeString(scriptFile.toPath(), content);
+      if (!scriptFile.setExecutable(true)) {
+        throw new RuntimeException("Failed to set script as executable");
+      }
+      return scriptFile.getAbsolutePath();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to create test entry script", e);
+    }
+  }
+
+  /**
+   * Generate a test lib script for job operation test
+   *
+   * @return the path of the lib script
+   */
+  protected static String generateTestLibScript() {
+    String content = "#!/bin/bash\necho \"in common script\"\n";
+
+    try {
+      File scriptFile = new File(testStagingDir, "common.sh");
+      Files.writeString(scriptFile.toPath(), content);
+      if (!scriptFile.setExecutable(true)) {
+        throw new RuntimeException("Failed to set script as executable");
+      }
+      return scriptFile.getAbsolutePath();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to create test lib script", e);
+    }
   }
 }

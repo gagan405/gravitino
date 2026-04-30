@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
@@ -38,11 +39,13 @@ import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.SecurableObject;
 import org.apache.gravitino.authorization.SecurableObjects;
 import org.apache.gravitino.client.GravitinoMetalake;
+import org.apache.gravitino.exceptions.ForbiddenException;
 import org.apache.gravitino.integration.test.container.ContainerSuite;
 import org.apache.gravitino.integration.test.container.KafkaContainer;
 import org.apache.gravitino.messaging.Topic;
 import org.apache.gravitino.messaging.TopicCatalog;
 import org.apache.gravitino.messaging.TopicChange;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -98,7 +101,7 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     assertEquals(CATALOG, catalogLoadByNormalUser.name());
     assertThrows(
         "Can not access metadata {" + CATALOG + "." + SCHEMA + "}.",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           catalogLoadByNormalUser.asSchemas().loadSchema(SCHEMA);
         });
@@ -115,17 +118,28 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
         normalUserClient.loadMetalake(METALAKE).loadCatalog(CATALOG).asTopicCatalog();
     assertThrows(
         "Can not access metadata {" + CATALOG + "." + SCHEMA + "}.",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           topicCatalogNormalUser.createTopic(
               NameIdentifier.of(SCHEMA, "topic2"), "test2", null, new HashMap<>());
         });
+
+    assertThrows(
+        "Can not access metadata {" + CATALOG + "." + SCHEMA + "}.",
+        ForbiddenException.class,
+        () -> {
+          topicCatalogNormalUser.listTopics(Namespace.of(SCHEMA));
+        });
+
     // grant privileges
     GravitinoMetalake gravitinoMetalake = client.loadMetalake(METALAKE);
     gravitinoMetalake.grantPrivilegesToRole(
         role,
         MetadataObjects.of(CATALOG, SCHEMA, MetadataObject.Type.SCHEMA),
         ImmutableList.of(Privileges.UseSchema.allow(), Privileges.CreateTopic.allow()));
+
+    normalUserClient.loadMetalake(METALAKE).loadCatalog(CATALOG).asSchemas().loadSchema(SCHEMA);
+
     // normal user can now create topic
     topicCatalogNormalUser.createTopic(
         NameIdentifier.of(SCHEMA, "topic2"), "test2", null, new HashMap<>());
@@ -148,6 +162,7 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     // normal user can only see topics they have privilege for
     TopicCatalog topicCatalogNormalUser =
         normalUserClient.loadMetalake(METALAKE).loadCatalog(CATALOG).asTopicCatalog();
+
     NameIdentifier[] topicsListNormalUser = topicCatalogNormalUser.listTopics(Namespace.of(SCHEMA));
     assertArrayEquals(
         new NameIdentifier[] {
@@ -164,7 +179,7 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     // normal user can load topic2 and topic3, but not topic1
     assertThrows(
         String.format("Can not access metadata {%s.%s.%s}.", CATALOG, SCHEMA, "topic1"),
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           topicCatalogNormalUser.loadTopic(NameIdentifier.of(SCHEMA, "topic1"));
         });
@@ -192,7 +207,7 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     // normal user cannot alter topic1 (no privilege)
     assertThrows(
         String.format("Can not access metadata {%s.%s.%s}.", CATALOG, SCHEMA, "topic1"),
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           topicCatalogNormalUser.alterTopic(
               NameIdentifier.of(SCHEMA, "topic1"), TopicChange.updateComment("new comment"));
@@ -220,7 +235,7 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     // normal user cannot drop topic1
     assertThrows(
         String.format("Can not access metadata {%s.%s.%s}.", CATALOG, SCHEMA, "topic1"),
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           topicCatalogNormalUser.dropTopic(NameIdentifier.of(SCHEMA, "topic1"));
         });
@@ -232,9 +247,15 @@ public class TopicAuthorizationIT extends BaseRestApiAuthorizationIT {
     TopicCatalog topicCatalog = client.loadMetalake(METALAKE).loadCatalog(CATALOG).asTopicCatalog();
     topicCatalog.dropTopic(NameIdentifier.of(SCHEMA, "topic1"));
     // check topics are dropped
-    NameIdentifier[] topicsList = topicCatalog.listTopics(Namespace.of(SCHEMA));
-    assertArrayEquals(new NameIdentifier[] {}, topicsList);
-    NameIdentifier[] topicsListNormalUser = topicCatalogNormalUser.listTopics(Namespace.of(SCHEMA));
-    assertArrayEquals(new NameIdentifier[] {}, topicsListNormalUser);
+    Awaitility.await()
+        .atMost(30, TimeUnit.SECONDS)
+        .untilAsserted(
+            () -> {
+              NameIdentifier[] topicsList = topicCatalog.listTopics(Namespace.of(SCHEMA));
+              assertArrayEquals(new NameIdentifier[] {}, topicsList);
+              NameIdentifier[] topicsListNormalUser =
+                  topicCatalogNormalUser.listTopics(Namespace.of(SCHEMA));
+              assertArrayEquals(new NameIdentifier[] {}, topicsListNormalUser);
+            });
   }
 }

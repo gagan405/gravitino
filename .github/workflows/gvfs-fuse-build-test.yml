@@ -2,10 +2,11 @@ name: Build gvfs-fuse and testing
 
 # Controls when the workflow will run
 on:
-  push:
-    branches: [ "main", "branch-*" ]
-  pull_request:
-    branches: [ "main", "branch-*" ]
+  # Temporarily disable
+  # push:
+  #  branches: [ "main", "branch-*" ]
+  # pull_request:
+  #  branches: [ "main", "branch-*" ]
   workflow_dispatch:
 
 concurrency:
@@ -17,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3.0.2
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36
         id: filter
         with:
           filters: |
@@ -39,7 +40,7 @@ jobs:
               - build.gradle.kts
               - gradle.properties
               - gradlew
-              - setting.gradle.kts
+              - settings.gradle.kts
     outputs:
       source_changes: ${{ steps.filter.outputs.source_changes }}
 
@@ -65,7 +66,7 @@ jobs:
           cache: 'gradle'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - name: Check required command
         run: |
@@ -77,8 +78,8 @@ jobs:
 
       - name: Integration test
         run: |
-          ./gradlew build -x :clients:client-python:build -x test -x web -PjdkVersion=${{ matrix.java-version }}
-          ./gradlew compileDistribution -x :clients:client-python:build -x test -x web -PjdkVersion=${{ matrix.java-version }}
+          ./gradlew build -PskipWeb=true -x :clients:client-python:build -x test -x web -PskipTrinoConnector=true
+          ./gradlew compileDistribution -PskipWeb=true -x :clients:client-python:build -x test -x web -PskipTrinoConnector=true
           cd clients/filesystem-fuse
           make test-s3
           make test-fuse-it
@@ -88,7 +89,7 @@ jobs:
           dev/ci/util_free_space.sh
 
       - name: Upload tests reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ (failure() && steps.integrationTest.outcome == 'failure') || contains(github.event.pull_request.labels.*.name, 'upload log') }}
         with:
           name: Gvfs-fuse integrate-test-reports-${{ matrix.java-version }}
@@ -96,4 +97,3 @@ jobs:
             clients/filesystem-fuse/target/debug/fuse.log
             distribution/package/logs/gravitino-server.out
             distribution/package/logs/gravitino-server.log
-

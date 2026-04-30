@@ -26,6 +26,7 @@ import { useSearchParams } from 'next/navigation'
 
 import { useAppDispatch } from '@/lib/hooks/useStore'
 import { initialVersion, fetchGitHubInfo } from '@/lib/store/sys'
+import { oauthProviderFactory } from '@/lib/auth/providers/factory'
 
 import { to } from '../utils'
 import { getAuthConfigs, setAuthToken } from '../store/auth'
@@ -44,11 +45,13 @@ export const useAuth = () => useContext(AuthContext)
 
 const AuthProvider = ({ children }) => {
   const router = useRouter()
-  const [loading, setLoading] = useState(authProvider.loading)
-
-  const token = (typeof window !== 'undefined' && localStorage.getItem('accessToken')) || null
-  const version = (typeof window !== 'undefined' && localStorage.getItem('version')) || null
   const searchParams = useSearchParams()
+  const dispatch = useAppDispatch()
+
+  const [loading, setLoading] = useState(authProvider.loading)
+  const [token, setToken] = useState(null)
+
+  const version = (typeof window !== 'undefined' && localStorage.getItem('version')) || null
   const paramsSize = [...searchParams.keys()].length
 
   const expiredIn = localStorage.getItem('expiredIn') && JSON.parse(localStorage.getItem('expiredIn')) // seconds
@@ -62,38 +65,56 @@ const AuthProvider = ({ children }) => {
   }, [isIdle])
 
   const goToMetalakeListPage = () => {
-    if (paramsSize) {
-      router.refresh()
-    } else {
-      router.push('/metalakes')
+    try {
+      let pathname = window.location.pathname
+
+      // Remove /ui prefix since Next.js basePath will add it automatically
+      if (pathname.startsWith('/ui')) {
+        pathname = pathname.slice(3) || '/'
+      }
+      if (pathname === '/' || pathname === '') {
+        router.replace('/metalakes')
+      } else {
+        router.replace(pathname + window.location.search)
+      }
+    } catch (e) {
+      router.replace('/metalakes')
     }
   }
-
-  const dispatch = useAppDispatch()
 
   useEffect(() => {
     const initAuth = async () => {
       const [authConfigsErr, resAuthConfigs] = await to(dispatch(getAuthConfigs()))
       const authType = resAuthConfigs?.payload?.authType
 
+      // Always fetch GitHub info since it's a public API call
+      dispatch(fetchGitHubInfo())
+
       if (authType === 'simple') {
         dispatch(initialVersion())
-        dispatch(fetchGitHubInfo())
         goToMetalakeListPage()
       } else if (authType === 'oauth') {
-        if (token) {
-          dispatch(setAuthToken(token))
+        const tokenToUse = await oauthProviderFactory.getAccessToken()
+
+        // Update local token state
+        setToken(tokenToUse)
+
+        if (tokenToUse) {
+          dispatch(setAuthToken(tokenToUse))
           dispatch(initialVersion())
-          dispatch(fetchGitHubInfo())
           goToMetalakeListPage()
         } else {
+          // Don't redirect to login if we're on the OAuth callback page
+          // Let the callback page handle the OAuth flow completion
+          if (typeof window !== 'undefined' && window.location.pathname.startsWith('/ui/oauth/callback')) {
+            return
+          }
           router.push('/login')
         }
       }
     }
 
     initAuth()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const values = {

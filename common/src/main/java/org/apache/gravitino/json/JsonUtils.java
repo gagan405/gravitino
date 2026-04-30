@@ -18,6 +18,10 @@
  */
 package org.apache.gravitino.json;
 
+import static org.apache.gravitino.dto.rel.expressions.FunctionArg.ArgType.FIELD;
+import static org.apache.gravitino.dto.rel.expressions.FunctionArg.ArgType.FUNCTION;
+import static org.apache.gravitino.dto.rel.expressions.FunctionArg.ArgType.LITERAL;
+
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.PropertyAccessor;
 import com.fasterxml.jackson.core.JacksonException;
@@ -35,6 +39,7 @@ import com.fasterxml.jackson.databind.cfg.EnumFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.google.common.annotations.VisibleForTesting;
@@ -44,10 +49,13 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.apache.gravitino.NameIdentifier;
@@ -85,6 +93,8 @@ import org.apache.gravitino.rel.expressions.sorts.SortDirection;
 import org.apache.gravitino.rel.indexes.Index;
 import org.apache.gravitino.rel.types.Type;
 import org.apache.gravitino.rel.types.Types;
+import org.apache.gravitino.stats.StatisticValue;
+import org.apache.gravitino.stats.StatisticValues;
 
 /** Utility class for working with JSON data. */
 public class JsonUtils {
@@ -300,8 +310,12 @@ public class JsonUtils {
                 new SimpleModule()
                     .addDeserializer(Type.class, new TypeDeserializer())
                     .addSerializer(Type.class, new TypeSerializer())
+                    .addDeserializer(Partitioning.class, new PartitioningDeserializer())
+                    .addSerializer(Partitioning.class, new PartitioningSerializer())
                     .addDeserializer(Expression.class, new ColumnDefaultValueDeserializer())
-                    .addSerializer(Expression.class, new ColumnDefaultValueSerializer()));
+                    .addSerializer(Expression.class, new ColumnDefaultValueSerializer())
+                    .addDeserializer(StatisticValue.class, new StatisticValueDeserializer())
+                    .addSerializer(StatisticValue.class, new StatisticValueSerializer()));
   }
 
   /**
@@ -709,7 +723,7 @@ public class JsonUtils {
       String text = node.asText().toLowerCase();
       return text.equals(Types.NullType.get().simpleString())
           ? Types.NullType.get()
-          : fromPrimitiveTypeString(text);
+          : fromPrimitiveTypeString(text, node.asText());
     }
 
     if (node.isObject() && node.has(TYPE)) {
@@ -828,49 +842,49 @@ public class JsonUtils {
     gen.writeEndObject();
   }
 
-  private static Type fromPrimitiveTypeString(String typeString) {
-    Type.PrimitiveType primitiveType = TYPES.get(typeString);
+  private static Type fromPrimitiveTypeString(String lowerTypeString, String orignalTypeString) {
+    Type.PrimitiveType primitiveType = TYPES.get(lowerTypeString);
     if (primitiveType != null) {
       return primitiveType;
     }
 
-    Matcher fixed = FIXED.matcher(typeString);
+    Matcher fixed = FIXED.matcher(lowerTypeString);
     if (fixed.matches()) {
       return Types.FixedType.of(Integer.parseInt(fixed.group(1)));
     }
 
-    Matcher fixedChar = FIXEDCHAR.matcher(typeString);
+    Matcher fixedChar = FIXEDCHAR.matcher(lowerTypeString);
     if (fixedChar.matches()) {
       return Types.FixedCharType.of(Integer.parseInt(fixedChar.group(1)));
     }
 
-    Matcher varchar = VARCHAR.matcher(typeString);
+    Matcher varchar = VARCHAR.matcher(lowerTypeString);
     if (varchar.matches()) {
       return Types.VarCharType.of(Integer.parseInt(varchar.group(1)));
     }
 
-    Matcher decimal = DECIMAL.matcher(typeString);
+    Matcher decimal = DECIMAL.matcher(lowerTypeString);
     if (decimal.matches()) {
       return Types.DecimalType.of(
           Integer.parseInt(decimal.group(1)), Integer.parseInt(decimal.group(2)));
     }
 
-    Matcher time = TIME.matcher(typeString);
+    Matcher time = TIME.matcher(lowerTypeString);
     if (time.matches()) {
       return Types.TimeType.of(Integer.parseInt(time.group(1)));
     }
 
-    Matcher timestampTz = TIMESTAMP_TZ.matcher(typeString);
+    Matcher timestampTz = TIMESTAMP_TZ.matcher(lowerTypeString);
     if (timestampTz.matches()) {
       return Types.TimestampType.withTimeZone(Integer.parseInt(timestampTz.group(1)));
     }
 
-    Matcher timestamp = TIMESTAMP.matcher(typeString);
+    Matcher timestamp = TIMESTAMP.matcher(lowerTypeString);
     if (timestamp.matches()) {
       return Types.TimestampType.withoutTimeZone(Integer.parseInt(timestamp.group(1)));
     }
 
-    return Types.UnparsedType.of(typeString);
+    return Types.UnparsedType.of(orignalTypeString);
   }
 
   private static Types.StructType readStructType(JsonNode node) {
@@ -1343,6 +1357,94 @@ public class JsonUtils {
     }
   }
 
+  /** Custom JSON deserializer for StatisticValue objects. */
+  public static class StatisticValueDeserializer extends JsonDeserializer<StatisticValue> {
+    @Override
+    public StatisticValue<?> deserialize(JsonParser p, DeserializationContext ctxt)
+        throws IOException {
+      JsonNode node = p.getCodec().readTree(p);
+      return getStatisticValue(node);
+    }
+  }
+
+  private static StatisticValue<?> getStatisticValue(JsonNode node) throws IOException {
+    Preconditions.checkArgument(
+        node != null && !node.isNull(), "Cannot parse statistic value from invalid JSON: %s", node);
+    if (node.isIntegralNumber()) {
+      return StatisticValues.longValue(node.asLong());
+    } else if (node.isFloatingPointNumber()) {
+      return StatisticValues.doubleValue(node.asDouble());
+    } else if (node.isTextual()) {
+      return StatisticValues.stringValue(node.asText());
+    } else if (node.isBoolean()) {
+      return StatisticValues.booleanValue(node.asBoolean());
+    } else if (node.isArray()) {
+      ArrayNode arrayNode = (ArrayNode) node;
+      List<StatisticValue<Object>> values = Lists.newArrayListWithCapacity(arrayNode.size());
+      for (JsonNode arrayElement : arrayNode) {
+        StatisticValue<?> value = getStatisticValue(arrayElement);
+        if (value != null) {
+          values.add((StatisticValue<Object>) value);
+        }
+      }
+      return StatisticValues.listValue(values);
+    } else if (node.isObject()) {
+      ObjectNode objectNode = (ObjectNode) node;
+      Map<String, StatisticValue<?>> map = Maps.newHashMap();
+      objectNode
+          .fields()
+          .forEachRemaining(
+              entry -> {
+                try {
+                  StatisticValue<?> value = getStatisticValue(entry.getValue());
+                  if (value != null) {
+                    map.put(entry.getKey(), value);
+                  }
+                } catch (IOException e) {
+                  throw new RuntimeException(e);
+                }
+              });
+      return StatisticValues.objectValue(map);
+    } else {
+      throw new UnsupportedEncodingException(
+          String.format("Don't support json node type %s", node.getNodeType()));
+    }
+  }
+
+  /** Custom JSON serializer for StatisticValue objects. */
+  public static class StatisticValueSerializer extends JsonSerializer<StatisticValue> {
+
+    @Override
+    public void serialize(StatisticValue value, JsonGenerator gen, SerializerProvider serializers)
+        throws IOException {
+      if (value.dataType().name() == Type.Name.BOOLEAN) {
+        gen.writeBoolean((Boolean) value.value());
+      } else if (value.dataType().name() == Type.Name.STRING) {
+        gen.writeString((String) value.value());
+      } else if (value.dataType().name() == Type.Name.DOUBLE) {
+        gen.writeNumber((Double) value.value());
+      } else if (value.dataType().name() == Type.Name.LONG) {
+        gen.writeNumber((Long) value.value());
+      } else if (value.dataType().name() == Type.Name.LIST) {
+        gen.writeStartArray();
+        for (StatisticValue<?> element : (List<StatisticValue<?>>) value.value()) {
+          serialize(element, gen, serializers);
+        }
+        gen.writeEndArray();
+      } else if (value.dataType().name() == Type.Name.STRUCT) {
+        gen.writeStartObject();
+        for (Map.Entry<String, StatisticValue<?>> entry :
+            ((Map<String, StatisticValue<?>>) value.value()).entrySet()) {
+          gen.writeFieldName(entry.getKey());
+          serialize(entry.getValue(), gen, serializers);
+        }
+        gen.writeEndObject();
+      } else {
+        throw new IOException("Unsupported statistic value type: " + value.dataType());
+      }
+    }
+  }
+
   /** Custom JSON serializer for PartitionDTO objects. */
   public static class PartitionDTOSerializer extends JsonSerializer<PartitionDTO> {
     @Override
@@ -1373,14 +1475,18 @@ public class JsonUtils {
       }
       gen.writeFieldName(INDEX_FIELD_NAMES);
       gen.writeObject(value.fieldNames());
+      Map<String, String> props = value.properties();
+      gen.writeFieldName("properties");
+      Map<String, String> sortedProps = new TreeMap<>(props);
+      gen.writeObject(sortedProps);
       gen.writeEndObject();
     }
   }
 
   /** Custom JSON deserializer for Index objects. */
-  public static class IndexDeserializer extends JsonDeserializer<Index> {
+  public static class IndexDeserializer extends JsonDeserializer<IndexDTO> {
     @Override
-    public Index deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
+    public IndexDTO deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
       JsonNode node = p.getCodec().readTree(p);
       Preconditions.checkArgument(
           node != null && !node.isNull() && node.isObject(),
@@ -1401,6 +1507,20 @@ public class JsonUtils {
       node.get(INDEX_FIELD_NAMES)
           .forEach(field -> fieldNames.add(getStringArray((ArrayNode) field)));
       builder.withFieldNames(fieldNames.toArray(new String[0][0]));
+      Map<String, String> properties = ImmutableMap.of();
+
+      if (node.has("properties") && node.get("properties").isObject()) {
+
+        Map<String, String> props = new HashMap<>();
+
+        node.get("properties")
+            .fields()
+            .forEachRemaining(entry -> props.put(entry.getKey(), entry.getValue().asText()));
+
+        properties = props;
+      }
+
+      builder.withProperties(properties);
       return builder.build();
     }
   }

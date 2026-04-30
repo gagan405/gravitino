@@ -20,6 +20,7 @@
 package org.apache.gravitino.catalog.jdbc.config;
 
 import java.util.Map;
+import java.util.Objects;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.config.ConfigBuilder;
@@ -65,7 +66,7 @@ public class JdbcConfig extends Config {
           .doc("The password of the Jdbc connection")
           .version(ConfigConstants.VERSION_0_3_0)
           .stringConf()
-          .checkValue(StringUtils::isNotBlank, ConfigConstants.NOT_BLANK_ERROR_MSG)
+          .checkValue(Objects::nonNull, ConfigConstants.NOT_NULL_ERROR_MSG)
           .create();
 
   public static final ConfigEntry<Integer> POOL_MIN_SIZE =
@@ -90,6 +91,14 @@ public class JdbcConfig extends Config {
           .version(ConfigConstants.VERSION_0_5_0)
           .booleanConf()
           .createWithDefault(true);
+
+  public static final ConfigEntry<Long> POOL_MAX_WAIT_MS =
+      new ConfigBuilder("jdbc.pool.max-wait-ms")
+          .doc("The maximum Duration that the pool will wait for a connection to be returned")
+          .version(ConfigConstants.VERSION_1_1_0)
+          .longConf()
+          .checkValue(value -> value > 0, ConfigConstants.POSITIVE_NUMBER_ERROR_MSG)
+          .createWithDefault(30000L);
 
   public String getJdbcUrl() {
     return get(JDBC_URL);
@@ -121,6 +130,10 @@ public class JdbcConfig extends Config {
 
   public boolean getTestOnBorrow() {
     return get(TEST_ON_BORROW);
+  }
+
+  public long getMaxWaitMs() {
+    return get(POOL_MAX_WAIT_MS);
   }
 
   public JdbcConfig(Map<String, String> properties) {

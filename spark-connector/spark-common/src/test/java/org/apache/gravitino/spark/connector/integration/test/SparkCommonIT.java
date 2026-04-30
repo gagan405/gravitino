@@ -125,9 +125,9 @@ public abstract class SparkCommonIT extends SparkEnvIT {
 
   protected abstract boolean supportsUpdateColumnPosition();
 
-  // @todo temporarily added for: https://github.com/apache/gravitino/issues/6907, should be removed
-  // after the issue is addressed
-  protected abstract boolean supportListTable();
+  protected boolean supportsCreateTableWithComment() {
+    return true;
+  }
 
   protected SparkTableInfoChecker getTableInfoChecker() {
     return SparkTableInfoChecker.create();
@@ -184,7 +184,6 @@ public abstract class SparkCommonIT extends SparkEnvIT {
   }
 
   @Test
-  @EnabledIf("supportListTable")
   void testListTables() {
     String tableName = "t_list";
     dropTableIfExists(tableName);
@@ -195,6 +194,31 @@ public abstract class SparkCommonIT extends SparkEnvIT {
     Assertions.assertTrue(tableNames.contains(tableName));
     Assertions.assertThrowsExactly(
         NoSuchNamespaceException.class, () -> sql("SHOW TABLES IN nonexistent_schema"));
+  }
+
+  @Test
+  @EnabledIf("supportsFunction")
+  void testCallUDF() {
+    // test call function
+    List<String> data =
+        getQueryData(String.format("SELECT %s.%s('abc')", functionSchemaName, functionName));
+    Assertions.assertEquals(1, data.size());
+    Assertions.assertEquals("3", data.get(0));
+  }
+
+  @Test
+  @EnabledIf("supportsFunction")
+  void testListFunctions() {
+    // Test list functions - should only include Spark runtime functions
+    Set<String> functionNames = listUserFunctions(functionSchemaName);
+    Assertions.assertTrue(
+        functionNames.contains(
+            String.join(".", getCatalogName(), functionSchemaName, functionName)));
+
+    // Non-Spark function should NOT be listed
+    Assertions.assertFalse(
+        functionNames.contains(
+            String.join(".", getCatalogName(), functionSchemaName, nonSparkFunctionName)));
   }
 
   @Test
@@ -323,6 +347,7 @@ public abstract class SparkCommonIT extends SparkEnvIT {
   }
 
   @Test
+  @EnabledIf("supportsCreateTableWithComment")
   void testCreateTableWithComment() {
     String tableName = "comment_table";
     dropTableIfExists(tableName);
@@ -383,7 +408,6 @@ public abstract class SparkCommonIT extends SparkEnvIT {
   }
 
   @Test
-  @EnabledIf("supportListTable")
   void testListTable() {
     String table1 = "list1";
     String table2 = "list2";

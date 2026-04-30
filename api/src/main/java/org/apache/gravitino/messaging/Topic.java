@@ -25,6 +25,7 @@ import org.apache.gravitino.Auditable;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.annotation.Evolving;
 import org.apache.gravitino.authorization.SupportsRoles;
+import org.apache.gravitino.policy.SupportsPolicies;
 import org.apache.gravitino.tag.SupportsTags;
 
 /**
@@ -38,16 +39,22 @@ import org.apache.gravitino.tag.SupportsTags;
 @Evolving
 public interface Topic extends Auditable {
 
-  /** @return Name of the topic */
+  /**
+   * @return Name of the topic
+   */
   String name();
 
-  /** @return The comment of the topic object. Null is returned if no comment is set. */
+  /**
+   * @return The comment of the topic object. Null is returned if no comment is set.
+   */
   @Nullable
   default String comment() {
     return null;
   }
 
-  /** @return The properties of the topic object. Empty map is returned if no properties are set. */
+  /**
+   * @return The properties of the topic object. Empty map is returned if no properties are set.
+   */
   default Map<String, String> properties() {
     return Collections.emptyMap();
   }
@@ -58,6 +65,14 @@ public interface Topic extends Auditable {
    */
   default SupportsTags supportsTags() {
     throw new UnsupportedOperationException("Topic does not support tag operations.");
+  }
+
+  /**
+   * @return the {@link SupportsPolicies} if the topic supports policy operations.
+   * @throws UnsupportedOperationException if the topic does not support policy operations.
+   */
+  default SupportsPolicies supportsPolicies() {
+    throw new UnsupportedOperationException("Topic does not support policy operations.");
   }
 
   /**

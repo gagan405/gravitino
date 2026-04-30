@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.apache.gravitino.Entity;
@@ -34,6 +35,7 @@ import org.apache.gravitino.EntityAlreadyExistsException;
 import org.apache.gravitino.EntityStore;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.SupportsRelationOperations;
 import org.apache.gravitino.exceptions.NoSuchEntityException;
 import org.apache.gravitino.exceptions.NoSuchMetadataObjectException;
 import org.apache.gravitino.exceptions.NoSuchTagException;
@@ -43,8 +45,10 @@ import org.apache.gravitino.exceptions.TagAlreadyExistsException;
 import org.apache.gravitino.lock.LockType;
 import org.apache.gravitino.lock.TreeLockUtils;
 import org.apache.gravitino.meta.AuditInfo;
+import org.apache.gravitino.meta.GenericEntity;
 import org.apache.gravitino.meta.TagEntity;
 import org.apache.gravitino.storage.IdGenerator;
+import org.apache.gravitino.storage.relational.service.MetadataObjectService;
 import org.apache.gravitino.utils.MetadataObjectUtil;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -60,19 +64,17 @@ public class TagManager implements TagDispatcher {
 
   private final EntityStore entityStore;
 
-  private final SupportsTagOperations supportsTagOperations;
+  private static final Set<MetadataObject.Type> SUPPORTED_METADATA_OBJECT_TYPES_FOR_TAGS =
+      Sets.newHashSet(
+          MetadataObject.Type.CATALOG,
+          MetadataObject.Type.SCHEMA,
+          MetadataObject.Type.TABLE,
+          MetadataObject.Type.FILESET,
+          MetadataObject.Type.TOPIC,
+          MetadataObject.Type.COLUMN,
+          MetadataObject.Type.MODEL);
 
   public TagManager(IdGenerator idGenerator, EntityStore entityStore) {
-    if (!(entityStore instanceof SupportsTagOperations)) {
-      String errorMsg =
-          "TagManager cannot run with entity store that does not support tag operations, "
-              + "please configure the entity store to use relational entity store and restart the Gravitino server";
-      LOG.error(errorMsg);
-      throw new RuntimeException(errorMsg);
-    }
-
-    this.supportsTagOperations = entityStore.tagOperations();
-
     this.idGenerator = idGenerator;
     this.entityStore = entityStore;
   }
@@ -82,12 +84,11 @@ public class TagManager implements TagDispatcher {
   }
 
   public Tag[] listTagsInfo(String metalake) {
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
     return TreeLockUtils.doWithTreeLock(
         NameIdentifier.of(NamespaceUtil.ofTag(metalake).levels()),
         LockType.READ,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           try {
             return entityStore
                 .list(NamespaceUtil.ofTag(metalake), TagEntity.class, Entity.EntityType.TAG)
@@ -103,13 +104,12 @@ public class TagManager implements TagDispatcher {
   public Tag createTag(String metalake, String name, String comment, Map<String, String> properties)
       throws TagAlreadyExistsException {
     Map<String, String> tagProperties = properties == null ? Collections.emptyMap() : properties;
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
 
     return TreeLockUtils.doWithTreeLock(
-        NameIdentifier.of(NamespaceUtil.ofTag(metalake).levels()),
+        NameIdentifierUtil.ofTag(metalake, name),
         LockType.WRITE,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           TagEntity tagEntity =
               TagEntity.builder()
                   .withId(idGenerator.nextId())
@@ -138,12 +138,11 @@ public class TagManager implements TagDispatcher {
   }
 
   public Tag getTag(String metalake, String name) throws NoSuchTagException {
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
     return TreeLockUtils.doWithTreeLock(
         NameIdentifierUtil.ofTag(metalake, name),
         LockType.READ,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           try {
             return entityStore.get(
                 NameIdentifierUtil.ofTag(metalake, name), Entity.EntityType.TAG, TagEntity.class);
@@ -159,12 +158,11 @@ public class TagManager implements TagDispatcher {
 
   public Tag alterTag(String metalake, String name, TagChange... changes)
       throws NoSuchTagException, IllegalArgumentException {
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
     return TreeLockUtils.doWithTreeLock(
-        NameIdentifier.of(NamespaceUtil.ofTag(metalake).levels()),
+        NameIdentifierUtil.ofTag(metalake, name),
         LockType.WRITE,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           try {
             return entityStore.update(
                 NameIdentifierUtil.ofTag(metalake, name),
@@ -175,8 +173,14 @@ public class TagManager implements TagDispatcher {
             throw new NoSuchTagException(
                 "Tag with name %s under metalake %s does not exist", name, metalake);
           } catch (EntityAlreadyExistsException e) {
-            throw new RuntimeException(
-                "Tag with name " + name + " under metalake " + metalake + " already exists");
+            String newName =
+                Arrays.stream(changes)
+                    .filter(c -> c instanceof TagChange.RenameTag)
+                    .map(c -> ((TagChange.RenameTag) c).getNewName())
+                    .findFirst()
+                    .orElse(name);
+            throw new TagAlreadyExistsException(
+                e, "Tag with name %s under metalake %s already exists", newName, metalake);
           } catch (IOException ioe) {
             LOG.error("Failed to alter tag {} under metalake {}", name, metalake, ioe);
             throw new RuntimeException(ioe);
@@ -185,12 +189,11 @@ public class TagManager implements TagDispatcher {
   }
 
   public boolean deleteTag(String metalake, String name) {
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
     return TreeLockUtils.doWithTreeLock(
-        NameIdentifier.of(NamespaceUtil.ofTag(metalake).levels()),
+        NameIdentifierUtil.ofTag(metalake, name),
         LockType.WRITE,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           try {
             return entityStore.delete(
                 NameIdentifierUtil.ofTag(metalake, name), Entity.EntityType.TAG);
@@ -204,20 +207,25 @@ public class TagManager implements TagDispatcher {
   public MetadataObject[] listMetadataObjectsForTag(String metalake, String name)
       throws NoSuchTagException {
     NameIdentifier tagId = NameIdentifierUtil.ofTag(metalake, name);
+    checkMetalake(NameIdentifier.of(metalake), entityStore);
     return TreeLockUtils.doWithTreeLock(
         tagId,
         LockType.READ,
         () -> {
-          checkMetalake(NameIdentifier.of(metalake), entityStore);
-
           try {
             if (!entityStore.exists(tagId, Entity.EntityType.TAG)) {
               throw new NoSuchTagException(
                   "Tag with name %s under metalake %s does not exist", name, metalake);
             }
 
-            return supportsTagOperations
-                .listAssociatedMetadataObjectsForTag(tagId)
+            List<GenericEntity> entities =
+                entityStore
+                    .relationOperations()
+                    .listEntitiesByRelation(
+                        SupportsRelationOperations.Type.TAG_METADATA_OBJECT_REL,
+                        tagId,
+                        Entity.EntityType.TAG);
+            return MetadataObjectService.fromGenericEntities(entities)
                 .toArray(new MetadataObject[0]);
           } catch (IOException e) {
             LOG.error("Failed to list metadata objects for tag {}", name, e);
@@ -245,9 +253,15 @@ public class TagManager implements TagDispatcher {
         LockType.READ,
         () -> {
           try {
-            return supportsTagOperations
-                .listAssociatedTagsForMetadataObject(entityIdent, entityType)
-                .toArray(new Tag[0]);
+            checkMetalake(NameIdentifier.of(metalake), entityStore);
+            List<TagEntity> tags =
+                entityStore
+                    .relationOperations()
+                    .listEntitiesByRelation(
+                        SupportsRelationOperations.Type.TAG_METADATA_OBJECT_REL,
+                        entityIdent,
+                        entityType);
+            return tags.toArray(new Tag[0]);
           } catch (NoSuchEntityException e) {
             throw new NoSuchMetadataObjectException(
                 e, "Failed to list tags for metadata object %s due to not found", metadataObject);
@@ -271,9 +285,16 @@ public class TagManager implements TagDispatcher {
         LockType.READ,
         () -> {
           try {
-            return supportsTagOperations.getTagForMetadataObject(entityIdent, entityType, tagIdent);
+            checkMetalake(NameIdentifier.of(metalake), entityStore);
+            return entityStore
+                .relationOperations()
+                .getEntityByRelation(
+                    SupportsRelationOperations.Type.TAG_METADATA_OBJECT_REL,
+                    entityIdent,
+                    entityType,
+                    tagIdent);
           } catch (NoSuchEntityException e) {
-            if (e.getMessage().contains("No such tag entity")) {
+            if (e.getMessage().contains("No such entity")) {
               throw new NoSuchTagException(
                   e, "Tag %s does not exist for metadata object %s", name, metadataObject);
             } else {
@@ -291,8 +312,7 @@ public class TagManager implements TagDispatcher {
       String metalake, MetadataObject metadataObject, String[] tagsToAdd, String[] tagsToRemove)
       throws NoSuchMetadataObjectException, TagAlreadyAssociatedException {
     Preconditions.checkArgument(
-        !metadataObject.type().equals(MetadataObject.Type.METALAKE)
-            && !metadataObject.type().equals(MetadataObject.Type.ROLE),
+        SUPPORTED_METADATA_OBJECT_TYPES_FOR_TAGS.contains(metadataObject.type()),
         "Cannot associate tags for unsupported metadata object type %s",
         metadataObject.type());
 
@@ -327,12 +347,17 @@ public class TagManager implements TagDispatcher {
                 LockType.WRITE,
                 () -> {
                   try {
-                    return supportsTagOperations
-                        .associateTagsWithMetadataObject(
-                            entityIdent, entityType, tagsToAddIdent, tagsToRemoveIdent)
-                        .stream()
-                        .map(Tag::name)
-                        .toArray(String[]::new);
+                    List<TagEntity> tags =
+                        entityStore
+                            .relationOperations()
+                            .updateEntityRelations(
+                                SupportsRelationOperations.Type.TAG_METADATA_OBJECT_REL,
+                                entityIdent,
+                                entityType,
+                                tagsToAddIdent,
+                                tagsToRemoveIdent);
+
+                    return tags.stream().map(Tag::name).toArray(String[]::new);
                   } catch (NoSuchEntityException e) {
                     throw new NoSuchMetadataObjectException(
                         e,

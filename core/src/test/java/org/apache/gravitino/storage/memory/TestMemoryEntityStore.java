@@ -31,6 +31,7 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.Entity;
 import org.apache.gravitino.Entity.EntityType;
@@ -124,6 +125,7 @@ public class TestMemoryEntityStore {
 
             E newE = updater.apply(e);
             NameIdentifier newIdent = NameIdentifier.of(newE.namespace(), newE.name());
+            // If the schema is changed for rename table operation, delete the old entry first
             if (!newIdent.equals(ident)) {
               delete(ident, entityType);
             }
@@ -145,6 +147,12 @@ public class TestMemoryEntityStore {
     }
 
     @Override
+    public <E extends Entity & HasIdentifier> List<E> batchGet(
+        List<NameIdentifier> idents, EntityType entityType, Class<E> e) {
+      return idents.stream().map(ident -> (E) entityMap.get(ident)).toList();
+    }
+
+    @Override
     public boolean delete(NameIdentifier ident, EntityType entityType, boolean cascade)
         throws IOException {
       Entity prev = entityMap.remove(ident);
@@ -154,8 +162,8 @@ public class TestMemoryEntityStore {
     @Override
     public <R, E extends Exception> R executeInTransaction(Executable<R, E> executable)
         throws E, IOException {
-      Map<NameIdentifier, Entity> snapshot = createSnapshot();
       lock.lock();
+      Map<NameIdentifier, Entity> snapshot = createSnapshot();
       try {
         return executable.execute();
       } catch (Exception e) {
@@ -171,22 +179,28 @@ public class TestMemoryEntityStore {
     }
 
     @Override
+    public int batchDelete(List<Pair<NameIdentifier, EntityType>> entitiesToDelete, boolean cascade)
+        throws IOException {
+      throw new UnsupportedOperationException(
+          "Batch delete is not supported in InMemoryEntityStore.");
+    }
+
+    @Override
+    public <E extends Entity & HasIdentifier> void batchPut(List<E> entities, boolean overwritten)
+        throws IOException, EntityAlreadyExistsException {
+      throw new UnsupportedOperationException("Batch put is not supported in InMemoryEntityStore.");
+    }
+
+    @Override
     public void close() throws IOException {
       entityMap.clear();
     }
 
     public Map<NameIdentifier, Entity> createSnapshot() {
-      lock.lock();
-      try {
-        return entityMap.entrySet().stream()
-            .collect(
-                Collectors.toMap(
-                    Map.Entry::getKey, Map.Entry::getValue, (e1, e2) -> e1, Maps::newHashMap));
-      } catch (Exception e) {
-        throw new RuntimeException("Failed to create snapshot of entity store", e);
-      } finally {
-        lock.unlock();
-      }
+      return entityMap.entrySet().stream()
+          .collect(
+              Collectors.toMap(
+                  Map.Entry::getKey, Map.Entry::getValue, (e1, e2) -> e1, Maps::newHashMap));
     }
   }
 

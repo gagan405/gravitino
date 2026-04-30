@@ -16,16 +16,23 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-FROM openjdk:17-jdk-buster
+FROM eclipse-temurin:17.0.16_8-jdk-jammy
 LABEL maintainer="dev@gravitino.apache.org"
 
-WORKDIR /root/gravitino
+RUN apt-get update && apt-get install -y \
+    python-is-python3
 
-COPY packages/gravitino /root/gravitino
+WORKDIR /opt/gravitino
+
+COPY packages/gravitino /opt/gravitino
+
+RUN chmod -R g+rwX /opt/gravitino \
+    && chmod +x /opt/gravitino/bin/start-gravitino.sh \
+    && useradd -u 1000 -g 0 -M -s /sbin/nologin gravitino
 
 EXPOSE 8090
 EXPOSE 9001
 
-RUN chmod +x /root/gravitino/bin/start-gravitino.sh
+USER 1000
 
-ENTRYPOINT ["/bin/bash", "/root/gravitino/bin/start-gravitino.sh"]
+ENTRYPOINT ["/bin/bash", "/opt/gravitino/bin/start-gravitino.sh"]

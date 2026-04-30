@@ -34,6 +34,9 @@ import org.apache.gravitino.catalog.CatalogNormalizeDispatcher;
 import org.apache.gravitino.catalog.FilesetDispatcher;
 import org.apache.gravitino.catalog.FilesetNormalizeDispatcher;
 import org.apache.gravitino.catalog.FilesetOperationDispatcher;
+import org.apache.gravitino.catalog.FunctionDispatcher;
+import org.apache.gravitino.catalog.FunctionNormalizeDispatcher;
+import org.apache.gravitino.catalog.FunctionOperationDispatcher;
 import org.apache.gravitino.catalog.ModelDispatcher;
 import org.apache.gravitino.catalog.ModelNormalizeDispatcher;
 import org.apache.gravitino.catalog.ModelOperationDispatcher;
@@ -49,27 +52,41 @@ import org.apache.gravitino.catalog.TableOperationDispatcher;
 import org.apache.gravitino.catalog.TopicDispatcher;
 import org.apache.gravitino.catalog.TopicNormalizeDispatcher;
 import org.apache.gravitino.catalog.TopicOperationDispatcher;
+import org.apache.gravitino.catalog.ViewDispatcher;
+import org.apache.gravitino.catalog.ViewOperationDispatcher;
 import org.apache.gravitino.credential.CredentialOperationDispatcher;
 import org.apache.gravitino.hook.AccessControlHookDispatcher;
 import org.apache.gravitino.hook.CatalogHookDispatcher;
 import org.apache.gravitino.hook.FilesetHookDispatcher;
+import org.apache.gravitino.hook.FunctionHookDispatcher;
+import org.apache.gravitino.hook.JobHookDispatcher;
 import org.apache.gravitino.hook.MetalakeHookDispatcher;
 import org.apache.gravitino.hook.ModelHookDispatcher;
+import org.apache.gravitino.hook.PolicyHookDispatcher;
 import org.apache.gravitino.hook.SchemaHookDispatcher;
 import org.apache.gravitino.hook.TableHookDispatcher;
+import org.apache.gravitino.hook.TagHookDispatcher;
 import org.apache.gravitino.hook.TopicHookDispatcher;
+import org.apache.gravitino.job.BuiltInJobTemplateEventListener;
+import org.apache.gravitino.job.JobManager;
+import org.apache.gravitino.job.JobOperationDispatcher;
+import org.apache.gravitino.job.JobTemplateValidationDispatcher;
+import org.apache.gravitino.listener.AccessControlEventDispatcher;
 import org.apache.gravitino.listener.CatalogEventDispatcher;
 import org.apache.gravitino.listener.EventBus;
 import org.apache.gravitino.listener.EventListenerManager;
 import org.apache.gravitino.listener.FilesetEventDispatcher;
+import org.apache.gravitino.listener.FunctionEventDispatcher;
+import org.apache.gravitino.listener.JobEventDispatcher;
 import org.apache.gravitino.listener.MetalakeEventDispatcher;
 import org.apache.gravitino.listener.ModelEventDispatcher;
 import org.apache.gravitino.listener.PartitionEventDispatcher;
+import org.apache.gravitino.listener.PolicyEventDispatcher;
 import org.apache.gravitino.listener.SchemaEventDispatcher;
+import org.apache.gravitino.listener.StatisticEventDispatcher;
 import org.apache.gravitino.listener.TableEventDispatcher;
 import org.apache.gravitino.listener.TagEventDispatcher;
 import org.apache.gravitino.listener.TopicEventDispatcher;
-import org.apache.gravitino.listener.api.event.AccessControlEventDispatcher;
 import org.apache.gravitino.lock.LockManager;
 import org.apache.gravitino.metalake.MetalakeDispatcher;
 import org.apache.gravitino.metalake.MetalakeManager;
@@ -78,6 +95,8 @@ import org.apache.gravitino.metrics.MetricsSystem;
 import org.apache.gravitino.metrics.source.JVMMetricsSource;
 import org.apache.gravitino.policy.PolicyDispatcher;
 import org.apache.gravitino.policy.PolicyManager;
+import org.apache.gravitino.stats.StatisticDispatcher;
+import org.apache.gravitino.stats.StatisticManager;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.storage.RandomIdGenerator;
 import org.apache.gravitino.tag.TagDispatcher;
@@ -116,6 +135,10 @@ public class GravitinoEnv {
 
   private ModelDispatcher modelDispatcher;
 
+  private FunctionDispatcher functionDispatcher;
+
+  private ViewDispatcher viewDispatcher;
+
   private MetalakeDispatcher metalakeDispatcher;
 
   private CredentialOperationDispatcher credentialOperationDispatcher;
@@ -138,10 +161,13 @@ public class GravitinoEnv {
 
   private AuditLogManager auditLogManager;
 
+  private JobOperationDispatcher jobOperationDispatcher;
+
   private EventBus eventBus;
   private OwnerDispatcher ownerDispatcher;
   private FutureGrantManager futureGrantManager;
   private GravitinoAuthorizer gravitinoAuthorizer;
+  private StatisticDispatcher statisticDispatcher;
 
   protected GravitinoEnv() {}
 
@@ -200,7 +226,7 @@ public class GravitinoEnv {
    * @return The EntityStore instance.
    */
   public EntityStore entityStore() {
-    Preconditions.checkNotNull(entityStore, "GravitinoEnv is not initialized.");
+    Preconditions.checkArgument(entityStore != null, "GravitinoEnv is not initialized.");
     return entityStore;
   }
 
@@ -241,7 +267,25 @@ public class GravitinoEnv {
   }
 
   /**
-   * Get the PartitionDispatcher associated with the Gravitino environment.
+   * Get the FunctionDispatcher associated with the Gravitino environment.
+   *
+   * @return The FunctionDispatcher instance.
+   */
+  public FunctionDispatcher functionDispatcher() {
+    return functionDispatcher;
+  }
+
+  /**
+   * Get the ViewDispatcher associated with the Gravitino environment.
+   *
+   * @return The ViewDispatcher instance.
+   */
+  public ViewDispatcher viewDispatcher() {
+    return viewDispatcher;
+  }
+
+  /**
+   * * Get the PartitionDispatcher associated with the Gravitino environment.
    *
    * @return The PartitionDispatcher instance.
    */
@@ -346,9 +390,9 @@ public class GravitinoEnv {
   }
 
   /**
-   * Get the AuditLogManager associated with the Gravitino environment.
+   * Get the PolicyDispatcher associated with the Gravitino environment.
    *
-   * @return The AuditLogManager instance.
+   * @return The PolicyDispatcher instance.
    */
   public PolicyDispatcher policyDispatcher() {
     return policyDispatcher;
@@ -399,6 +443,24 @@ public class GravitinoEnv {
     return gravitinoAuthorizer;
   }
 
+  /**
+   * Get the JobOperationDispatcher associated with the Gravitino environment.
+   *
+   * @return The JobOperationDispatcher instance.
+   */
+  public JobOperationDispatcher jobOperationDispatcher() {
+    Preconditions.checkArgument(jobOperationDispatcher != null, "GravitinoEnv is not initialized.");
+    return jobOperationDispatcher;
+  }
+
+  public StatisticDispatcher statisticDispatcher() {
+    return statisticDispatcher;
+  }
+
+  public boolean cacheEnabled() {
+    return config == null || config.get(Configs.CACHE_ENABLED);
+  }
+
   public void start() {
     metricsSystem.start();
     eventListenerManager.start();
@@ -441,6 +503,23 @@ public class GravitinoEnv {
 
     if (metalakeManager != null) {
       metalakeManager.close();
+    }
+
+    if (jobOperationDispatcher != null) {
+      try {
+        jobOperationDispatcher.close();
+        jobOperationDispatcher = null;
+      } catch (Exception e) {
+        LOG.warn("Failed to close JobOperationDispatcher", e);
+      }
+    }
+
+    if (statisticDispatcher != null) {
+      try {
+        statisticDispatcher.close();
+      } catch (Exception e) {
+        LOG.warn("Failed to close StatisticDispatcher", e);
+      }
     }
 
     LOG.info("Gravitino Environment is shut down.");
@@ -535,6 +614,28 @@ public class GravitinoEnv {
         new ModelNormalizeDispatcher(modelHookDispatcher, catalogManager);
     this.modelDispatcher = new ModelEventDispatcher(eventBus, modelNormalizeDispatcher);
 
+    // The operation chain is:
+    // FunctionEventDispatcher -> FunctionNormalizeDispatcher -> FunctionHookDispatcher ->
+    // FunctionOperationDispatcher
+    FunctionOperationDispatcher functionOperationDispatcher =
+        new FunctionOperationDispatcher(
+            catalogManager, schemaOperationDispatcher, entityStore, idGenerator);
+    FunctionHookDispatcher functionHookDispatcher =
+        new FunctionHookDispatcher(functionOperationDispatcher);
+    FunctionNormalizeDispatcher functionNormalizeDispatcher =
+        new FunctionNormalizeDispatcher(functionHookDispatcher, catalogManager);
+    this.functionDispatcher = new FunctionEventDispatcher(eventBus, functionNormalizeDispatcher);
+
+    // TODO: Add ViewHookDispatcher and ViewEventDispatcher when needed for view-specific hooks
+    //  and event handling.
+    ViewOperationDispatcher viewOperationDispatcher =
+        new ViewOperationDispatcher(catalogManager, entityStore, idGenerator);
+    this.viewDispatcher = viewOperationDispatcher;
+
+    this.statisticDispatcher =
+        new StatisticEventDispatcher(
+            eventBus, new StatisticManager(entityStore, idGenerator, config));
+
     // Create and initialize access control related modules
     boolean enableAuthorization = config.get(Configs.ENABLE_AUTHORIZATION);
     if (enableAuthorization) {
@@ -557,8 +658,24 @@ public class GravitinoEnv {
     this.auxServiceManager.serviceInit(config);
 
     // Create and initialize Tag related modules
-    this.tagDispatcher = new TagEventDispatcher(eventBus, new TagManager(idGenerator, entityStore));
-    // todo: support policy event dispatcher
-    this.policyDispatcher = new PolicyManager(idGenerator, entityStore);
+    TagManager tagManager = new TagManager(idGenerator, entityStore);
+    TagHookDispatcher tagHookDispatcher = new TagHookDispatcher(tagManager);
+    this.tagDispatcher = new TagEventDispatcher(eventBus, tagHookDispatcher);
+
+    PolicyEventDispatcher policyEventDispatcher =
+        new PolicyEventDispatcher(eventBus, new PolicyManager(idGenerator, entityStore));
+    this.policyDispatcher = new PolicyHookDispatcher(policyEventDispatcher);
+
+    JobManager jobManager = new JobManager(config, entityStore, idGenerator);
+    JobTemplateValidationDispatcher validationDispatcher =
+        new JobTemplateValidationDispatcher(jobManager);
+    this.jobOperationDispatcher =
+        new JobEventDispatcher(eventBus, new JobHookDispatcher(validationDispatcher));
+
+    // Register built-in job template event listener to automatically register templates
+    // when metalakes are created
+    BuiltInJobTemplateEventListener builtInJobTemplateListener =
+        new BuiltInJobTemplateEventListener(jobManager, entityStore, idGenerator);
+    eventListenerManager.addEventListener("builtin-job-template", builtInJobTemplateListener);
   }
 }

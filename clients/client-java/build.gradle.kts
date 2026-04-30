@@ -24,7 +24,9 @@ plugins {
 
 dependencies {
   implementation(project(":api"))
-  implementation(project(":common"))
+  implementation(project(":common")) {
+    exclude(group = "org.apache.logging.log4j")
+  }
   implementation(libs.jackson.databind)
   implementation(libs.jackson.annotations)
   implementation(libs.jackson.datatype.jdk8)
@@ -45,8 +47,10 @@ dependencies {
   testImplementation(project(":server"))
   testImplementation(project(":server-common"))
 
+  testImplementation(libs.awaitility)
   testImplementation(libs.bundles.jersey)
   testImplementation(libs.bundles.jwt)
+  testImplementation(libs.nimbus.jose.jwt)
   testImplementation(libs.commons.lang3)
   testImplementation(libs.hadoop3.client)
   testImplementation(libs.junit.jupiter.api)
@@ -67,11 +71,18 @@ tasks.build {
 }
 
 tasks.test {
+  javaLauncher.set(
+    javaToolchains.launcherFor {
+      languageVersion.set(JavaLanguageVersion.of(17))
+    }
+  )
+
   val skipITs = project.hasProperty("skipITs")
   if (skipITs) {
     exclude("**/integration/test/**")
   } else {
     dependsOn(":catalogs:catalog-fileset:jar", ":catalogs:catalog-fileset:runtimeJars")
+    dependsOn(":catalogs:catalog-model:jar", ":catalogs:catalog-model:runtimeJars")
     dependsOn(":catalogs:catalog-hive:jar", ":catalogs:catalog-hive:runtimeJars")
     dependsOn(":catalogs:catalog-kafka:jar", ":catalogs:catalog-kafka:runtimeJars")
   }
@@ -86,7 +97,7 @@ tasks.javadoc {
 
   classpath = configurations["compileClasspath"] +
     project(":api").configurations["runtimeClasspath"] +
-    project(":common").configurations["runtimeClasspath"]
+    project(":common").configurations["compileClasspath"]
 }
 
 tasks.clean {

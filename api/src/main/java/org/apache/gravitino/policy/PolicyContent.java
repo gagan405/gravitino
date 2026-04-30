@@ -18,18 +18,42 @@
  */
 package org.apache.gravitino.policy;
 
+import com.google.common.base.Preconditions;
 import java.util.Map;
+import java.util.Set;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.gravitino.MetadataObject;
 
 /** The interface of the content of the policy. */
 public interface PolicyContent {
 
-  /** @return The additional properties of the policy. */
+  /**
+   * @return the set of metadata object types that the policy can be applied to
+   */
+  Set<MetadataObject.Type> supportedObjectTypes();
+
+  /**
+   * @return The additional properties of the policy.
+   */
   Map<String, String> properties();
+
+  /**
+   * A convenience method to get all rules in the policy content.
+   *
+   * @return A map of rule names to their corresponding rule objects.
+   */
+  default Map<String, Object> rules() {
+    // backward compatibility
+    throw new UnsupportedOperationException("Does support get all rules.");
+  }
 
   /**
    * Validates the policy content.
    *
    * @throws IllegalArgumentException if the content is invalid.
    */
-  void validate() throws IllegalArgumentException;
+  default void validate() throws IllegalArgumentException {
+    Preconditions.checkArgument(
+        CollectionUtils.isNotEmpty(supportedObjectTypes()), "supportedObjectTypes cannot be empty");
+  }
 }

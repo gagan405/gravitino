@@ -26,9 +26,9 @@ plugins {
 
 val scalaVersion: String = project.properties["scalaVersion"] as? String ?: extra["defaultScalaVersion"].toString()
 val sparkVersion: String = libs.versions.spark35.get()
-val kyuubiVersion: String = libs.versions.kyuubi4paimon.get()
+val kyuubiVersion: String = libs.versions.kyuubi4authz.get()
 val sparkMajorVersion: String = sparkVersion.substringBeforeLast(".")
-val icebergVersion: String = libs.versions.iceberg4spark.get()
+val icebergVersion: String = libs.versions.iceberg.get()
 val paimonVersion: String = libs.versions.paimon.get()
 
 dependencies {
@@ -80,6 +80,7 @@ dependencies {
   testImplementation(project(":clients:client-java"))
   testImplementation(project(":server"))
   testImplementation(project(":integration-test-common", "testArtifacts"))
+  testImplementation(libs.awaitility)
   testImplementation(libs.junit.jupiter.api)
   testImplementation(libs.mockito.core)
   testImplementation(libs.mockito.inline)

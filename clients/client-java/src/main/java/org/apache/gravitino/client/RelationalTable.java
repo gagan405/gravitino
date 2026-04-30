@@ -26,6 +26,7 @@ import com.google.common.base.Joiner;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
 import lombok.SneakyThrows;
@@ -41,9 +42,15 @@ import org.apache.gravitino.dto.responses.DropResponse;
 import org.apache.gravitino.dto.responses.PartitionListResponse;
 import org.apache.gravitino.dto.responses.PartitionNameListResponse;
 import org.apache.gravitino.dto.responses.PartitionResponse;
+import org.apache.gravitino.exceptions.IllegalStatisticNameException;
 import org.apache.gravitino.exceptions.NoSuchPartitionException;
+import org.apache.gravitino.exceptions.NoSuchPolicyException;
 import org.apache.gravitino.exceptions.NoSuchTagException;
 import org.apache.gravitino.exceptions.PartitionAlreadyExistsException;
+import org.apache.gravitino.exceptions.PolicyAlreadyAssociatedException;
+import org.apache.gravitino.exceptions.UnmodifiableStatisticException;
+import org.apache.gravitino.policy.Policy;
+import org.apache.gravitino.policy.SupportsPolicies;
 import org.apache.gravitino.rel.Column;
 import org.apache.gravitino.rel.SupportsPartitions;
 import org.apache.gravitino.rel.Table;
@@ -53,11 +60,26 @@ import org.apache.gravitino.rel.expressions.transforms.Transform;
 import org.apache.gravitino.rel.indexes.Index;
 import org.apache.gravitino.rel.partitions.Partition;
 import org.apache.gravitino.rest.RESTUtils;
+import org.apache.gravitino.stats.PartitionRange;
+import org.apache.gravitino.stats.PartitionStatistics;
+import org.apache.gravitino.stats.PartitionStatisticsDrop;
+import org.apache.gravitino.stats.PartitionStatisticsUpdate;
+import org.apache.gravitino.stats.Statistic;
+import org.apache.gravitino.stats.StatisticValue;
+import org.apache.gravitino.stats.SupportsPartitionStatistics;
+import org.apache.gravitino.stats.SupportsStatistics;
 import org.apache.gravitino.tag.SupportsTags;
 import org.apache.gravitino.tag.Tag;
 
 /** Represents a relational table. */
-class RelationalTable implements Table, SupportsPartitions, SupportsTags, SupportsRoles {
+class RelationalTable
+    implements Table,
+        SupportsPartitions,
+        SupportsTags,
+        SupportsRoles,
+        SupportsPolicies,
+        SupportsStatistics,
+        SupportsPartitionStatistics {
 
   private static final Joiner DOT_JOINER = Joiner.on(".");
 
@@ -69,6 +91,9 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
 
   private final MetadataObjectTagOperations objectTagOperations;
   private final MetadataObjectRoleOperations objectRoleOperations;
+  private final MetadataObjectPolicyOperations objectPolicyOperations;
+  private final MetadataObjectStatisticsOperations objectStatisticsOperations;
+  private final MetadataObjectPartitionStatisticsOperations objectPartitionStatisticsOperations;
 
   /**
    * Creates a new RelationalTable.
@@ -99,6 +124,13 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
         new MetadataObjectTagOperations(namespace.level(0), tableObject, restClient);
     this.objectRoleOperations =
         new MetadataObjectRoleOperations(namespace.level(0), tableObject, restClient);
+    this.objectPolicyOperations =
+        new MetadataObjectPolicyOperations(namespace.level(0), tableObject, restClient);
+    this.objectStatisticsOperations =
+        new MetadataObjectStatisticsOperations(namespace.level(0), tableObject, restClient);
+    this.objectPartitionStatisticsOperations =
+        new MetadataObjectPartitionStatisticsOperations(
+            namespace.level(0), tableObject, restClient);
   }
 
   /**
@@ -111,7 +143,9 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
     return table.name();
   }
 
-  /** @return the columns of the table. */
+  /**
+   * @return the columns of the table.
+   */
   @Override
   public Column[] columns() {
     return Arrays.stream(table.columns())
@@ -127,50 +161,66 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
         .toArray(Column[]::new);
   }
 
-  /** @return the partitioning of the table. */
+  /**
+   * @return the partitioning of the table.
+   */
   @Override
   public Transform[] partitioning() {
     return table.partitioning();
   }
 
-  /** @return the sort order of the table. */
+  /**
+   * @return the sort order of the table.
+   */
   @Override
   public SortOrder[] sortOrder() {
     return table.sortOrder();
   }
 
-  /** @return the distribution of the table. */
+  /**
+   * @return the distribution of the table.
+   */
   @Override
   public Distribution distribution() {
     return table.distribution();
   }
 
-  /** @return the comment of the table. */
+  /**
+   * @return the comment of the table.
+   */
   @Nullable
   @Override
   public String comment() {
     return table.comment();
   }
 
-  /** @return the properties of the table. */
+  /**
+   * @return the properties of the table.
+   */
   @Override
   public Map<String, String> properties() {
     return table.properties();
   }
 
-  /** @return the audit information of the table. */
+  /**
+   * @return the audit information of the table.
+   */
   @Override
   public Audit auditInfo() {
     return table.auditInfo();
   }
 
-  /** @return the indexes of the table. */
+  /**
+   * @return the indexes of the table.
+   */
   @Override
   public Index[] index() {
     return table.index();
   }
 
-  /** @return The partition names of the table. */
+  /**
+   * @return The partition names of the table.
+   */
   @Override
   public String[] listPartitionNames() {
     PartitionNameListResponse resp =
@@ -182,7 +232,9 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
     return resp.partitionNames();
   }
 
-  /** @return The partition request path. */
+  /**
+   * @return The partition request path.
+   */
   @VisibleForTesting
   String getPartitionRequestPath() {
     return "api/metalakes/"
@@ -196,7 +248,9 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
         + "/partitions";
   }
 
-  /** @return The partitions of the table. */
+  /**
+   * @return The partitions of the table.
+   */
   @Override
   public Partition[] listPartitions() {
     Map<String, String> params = new HashMap<>();
@@ -300,7 +354,22 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
   }
 
   @Override
+  public SupportsPolicies supportsPolicies() {
+    return this;
+  }
+
+  @Override
   public SupportsRoles supportsRoles() {
+    return this;
+  }
+
+  @Override
+  public SupportsStatistics supportsStatistics() {
+    return this;
+  }
+
+  @Override
+  public SupportsPartitionStatistics supportsPartitionStatistics() {
     return this;
   }
 
@@ -329,7 +398,61 @@ class RelationalTable implements Table, SupportsPartitions, SupportsTags, Suppor
   }
 
   @Override
+  public String[] listPolicies() {
+    return objectPolicyOperations.listPolicies();
+  }
+
+  @Override
+  public Policy[] listPolicyInfos() {
+    return objectPolicyOperations.listPolicyInfos();
+  }
+
+  @Override
+  public Policy getPolicy(String name) throws NoSuchPolicyException {
+    return objectPolicyOperations.getPolicy(name);
+  }
+
+  @Override
+  public String[] associatePolicies(String[] policiesToAdd, String[] policiesToRemove)
+      throws PolicyAlreadyAssociatedException {
+    return objectPolicyOperations.associatePolicies(policiesToAdd, policiesToRemove);
+  }
+
+  @Override
   public String[] listBindingRoleNames() {
     return objectRoleOperations.listBindingRoleNames();
+  }
+
+  @Override
+  public List<Statistic> listStatistics() {
+    return objectStatisticsOperations.listStatistics();
+  }
+
+  @Override
+  public void updateStatistics(Map<String, StatisticValue<?>> statistics)
+      throws UnmodifiableStatisticException, IllegalStatisticNameException {
+    objectStatisticsOperations.updateStatistics(statistics);
+  }
+
+  @Override
+  public boolean dropStatistics(List<String> statistics) throws UnmodifiableStatisticException {
+    return objectStatisticsOperations.dropStatistics(statistics);
+  }
+
+  @Override
+  public List<PartitionStatistics> listPartitionStatistics(PartitionRange range) {
+    return objectPartitionStatisticsOperations.listPartitionStatistics(range);
+  }
+
+  @Override
+  public void updatePartitionStatistics(List<PartitionStatisticsUpdate> statisticsToUpdate)
+      throws UnmodifiableStatisticException {
+    objectPartitionStatisticsOperations.updatePartitionStatistics(statisticsToUpdate);
+  }
+
+  @Override
+  public boolean dropPartitionStatistics(List<PartitionStatisticsDrop> statisticsToDrop)
+      throws UnmodifiableStatisticException {
+    return objectPartitionStatisticsOperations.dropPartitionStatistics(statisticsToDrop);
   }
 }

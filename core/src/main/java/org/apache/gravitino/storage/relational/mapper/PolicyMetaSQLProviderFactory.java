@@ -19,6 +19,7 @@
 package org.apache.gravitino.storage.relational.mapper;
 
 import com.google.common.collect.ImmutableMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.gravitino.storage.relational.JDBCBackend.JDBCBackendType;
 import org.apache.gravitino.storage.relational.mapper.provider.base.PolicyMetaBaseSQLProvider;
@@ -49,6 +50,11 @@ public class PolicyMetaSQLProviderFactory {
 
   public static String listPolicyPOsByMetalake(@Param("metalakeName") String metalakeName) {
     return getProvider().listPolicyPOsByMetalake(metalakeName);
+  }
+
+  public static String listPolicyPOsByMetalakeAndPolicyNames(
+      @Param("metalakeName") String metalakeName, @Param("policyNames") List<String> policyNames) {
+    return getProvider().listPolicyPOsByMetalakeAndPolicyNames(metalakeName, policyNames);
   }
 
   public static String insertPolicyMetaOnDuplicateKeyUpdate(
@@ -83,6 +89,24 @@ public class PolicyMetaSQLProviderFactory {
 
   public static String softDeletePolicyMetasByMetalakeId(@Param("metalakeId") Long metalakeId) {
     return getProvider().softDeletePolicyMetasByMetalakeId(metalakeId);
+  }
+
+  public static String selectPolicyMetaByMetalakeIdAndName(
+      @Param("metalakeId") Long metalakeId, @Param("policyName") String policyName) {
+    return getProvider().selectPolicyMetaByMetalakeIdAndName(metalakeId, policyName);
+  }
+
+  public static String selectPolicyByPolicyId(@Param("policyId") Long policyId) {
+    return getProvider().selectPolicyByPolicyId(policyId);
+  }
+
+  public static String listPolicyPOsByPolicyIds(@Param("policyIds") List<Long> policyIds) {
+    return getProvider().listPolicyPOsByPolicyIds(policyIds);
+  }
+
+  public static String batchSelectPolicyByIdentifier(
+      @Param("metalakeName") String metalakeName, @Param("policyNames") List<String> policyNames) {
+    return getProvider().batchSelectPolicyByIdentifier(metalakeName, policyNames);
   }
 
   static class PolicyMetaMySQLProvider extends PolicyMetaBaseSQLProvider {}

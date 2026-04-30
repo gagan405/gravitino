@@ -19,6 +19,7 @@
 package org.apache.gravitino.catalog.doris.integration.test;
 
 import static org.apache.gravitino.integration.test.util.ITUtils.assertPartition;
+import static org.apache.gravitino.rel.Column.DEFAULT_VALUE_OF_CURRENT_TIMESTAMP;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -27,6 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import java.io.IOException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -75,13 +78,13 @@ import org.apache.gravitino.rel.partitions.Partitions;
 import org.apache.gravitino.rel.partitions.RangePartition;
 import org.apache.gravitino.rel.types.Types;
 import org.apache.gravitino.utils.RandomNameUtils;
+import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.shaded.org.awaitility.Awaitility;
 
 @Tag("gravitino-docker-test")
 public class CatalogDorisIT extends BaseIT {
@@ -561,10 +564,14 @@ public class CatalogDorisIT extends BaseIT {
         .pollInterval(WAIT_INTERVAL_IN_SECONDS, TimeUnit.SECONDS)
         .untilAsserted(
             () -> assertEquals(5, tableCatalog.loadTable(tableIdentifier).columns().length));
-
-    ITUtils.assertColumn(
-        Column.of("col_5", Types.VarCharType.of(255), "col_5_comment"),
-        tableCatalog.loadTable(tableIdentifier).columns()[4]);
+    Awaitility.await()
+        .atMost(MAX_WAIT_IN_SECONDS, TimeUnit.SECONDS)
+        .pollInterval(WAIT_INTERVAL_IN_SECONDS, TimeUnit.SECONDS)
+        .untilAsserted(
+            () ->
+                ITUtils.assertColumn(
+                    Column.of("col_5", Types.VarCharType.of(255), "col_5_comment"),
+                    tableCatalog.loadTable(tableIdentifier).columns()[4]));
 
     // change column position
     // TODO: change column position is unstable, add it later
@@ -1060,5 +1067,80 @@ public class CatalogDorisIT extends BaseIT {
     Assertions.assertArrayEquals(
         distribution.expressions(), loadTable.distribution().expressions());
     tableCatalog.dropTable(tableIdentifier);
+  }
+
+  @Test
+  void testColumnDefaultValue() {
+
+    Column col_default_value_date =
+        Column.of(
+            "col_default_value_date",
+            Types.DateType.get(),
+            "col_default_value_date",
+            false,
+            false,
+            Literals.dateLiteral("2024-01-01"));
+
+    Column col_default_value_timestamp =
+        Column.of(
+            "col_default_value_timestamp",
+            Types.TimestampType.withoutTimeZone(),
+            "col_default_value_timestamp",
+            false,
+            false,
+            Literals.timestampLiteral("2024-01-01T01:01:01"));
+
+    Column col_default_value_timestamp_2 =
+        Column.of(
+            "col_default_value_timestamp_2",
+            Types.TimestampType.withoutTimeZone(),
+            "col_default_value_timestamp_2",
+            false,
+            false,
+            DEFAULT_VALUE_OF_CURRENT_TIMESTAMP);
+    Column[] columns = createColumns();
+
+    columns =
+        ArrayUtils.addAll(
+            columns,
+            col_default_value_date,
+            col_default_value_timestamp,
+            col_default_value_timestamp_2);
+
+    NameIdentifier tableIdent =
+        NameIdentifier.of(
+            schemaName, GravitinoITUtils.genRandomName("test_table_with_default_value"));
+    Distribution distribution = createDistribution();
+
+    Index[] indexes =
+        new Index[] {
+          Indexes.of(Index.IndexType.PRIMARY_KEY, "k1_index", new String[][] {{DORIS_COL_NAME1}})
+        };
+
+    Map<String, String> properties = createTableProperties();
+    TableCatalog tableCatalog = catalog.asTableCatalog();
+    tableCatalog.createTable(
+        tableIdent,
+        columns,
+        table_comment,
+        properties,
+        Transforms.EMPTY_TRANSFORM,
+        distribution,
+        null,
+        indexes);
+
+    Table loadedTable = tableCatalog.loadTable(tableIdent);
+
+    Column[] colDefaultValues =
+        Arrays.stream(loadedTable.columns())
+            .filter(c -> c.name().startsWith("col_default_value_"))
+            .toArray(Column[]::new);
+
+    Assertions.assertEquals(
+        Literals.dateLiteral(LocalDate.of(2024, 1, 1)), colDefaultValues[0].defaultValue());
+    Assertions.assertEquals(
+        Literals.timestampLiteral(LocalDateTime.of(2024, 1, 1, 1, 1, 1)),
+        colDefaultValues[1].defaultValue());
+    Assertions.assertEquals(DEFAULT_VALUE_OF_CURRENT_TIMESTAMP, colDefaultValues[2].defaultValue());
   }
 }

@@ -121,6 +121,18 @@ const CreateCatalogDialog = props => {
 
   const providerSelect = watch('provider')
   const typeSelect = watch('type')
+  const catalogBackendSelect = watch('propItems').find(i => i.key === 'catalog-backend')?.value
+
+  useEffect(() => {
+    const updateProps = innerProps.map(item => {
+      if (item.key === 'warehouse') {
+        return { ...item, required: ['hive', 'jdbc'].includes(catalogBackendSelect) }
+      }
+
+      return item
+    })
+    setInnerProps(updateProps)
+  }, [catalogBackendSelect])
 
   const handleFormChange = ({ index, event }) => {
     let data = [...innerProps]
@@ -172,7 +184,7 @@ const CreateCatalogDialog = props => {
     const parentField = innerProps.find(i => i.key === field.parentField)
 
     const check =
-      (parentField && field.hide.includes(parentField.value)) ||
+      (parentField && field.hide?.includes(parentField.value)) ||
       (field.parentField === 'authentication.type' && parentField === undefined)
 
     return check
@@ -217,7 +229,7 @@ const CreateCatalogDialog = props => {
 
     if (
       propItems[0]?.key === 'catalog-backend' &&
-      propItems[0]?.value === 'hive' &&
+      ['hive', 'rest'].includes(propItems[0]?.value) &&
       ['lakehouse-iceberg', 'lakehouse-paimon'].includes(providerSelect)
     ) {
       nextProps = propItems.filter(item => !['jdbc-driver', 'jdbc-user', 'jdbc-password'].includes(item.key))
@@ -227,14 +239,6 @@ const CreateCatalogDialog = props => {
       providerSelect === 'lakehouse-paimon'
     ) {
       nextProps = propItems.filter(item => !['jdbc-driver', 'jdbc-user', 'jdbc-password', 'uri'].includes(item.key))
-    } else if (
-      propItems[0]?.key === 'catalog-backend' &&
-      propItems[0]?.value === 'rest' &&
-      providerSelect === 'lakehouse-iceberg'
-    ) {
-      nextProps = propItems.filter(
-        item => !['jdbc-driver', 'jdbc-user', 'jdbc-password', 'warehouse'].includes(item.key)
-      )
     }
     const parentField = nextProps.find(i => i.key === 'authentication.type')
     if (!parentField || parentField?.value === 'simple') {
@@ -265,6 +269,7 @@ const CreateCatalogDialog = props => {
           'jdbc-driver': jdbcDriver,
           'jdbc-user': jdbcUser,
           'jdbc-password': jdbcPwd,
+          warehouse: warehouse,
           uri: uri,
           'authentication.type': authType,
           'authentication.kerberos.principal': kerberosPrincipal,
@@ -272,38 +277,13 @@ const CreateCatalogDialog = props => {
           ...others
         } = prevProperties
 
-        if (
-          catalogBackend &&
-          catalogBackend === 'hive' &&
-          ['lakehouse-iceberg', 'lakehouse-paimon'].includes(providerSelect)
-        ) {
-          properties = {
-            'catalog-backend': catalogBackend,
-            uri: uri,
-            ...others
-          }
-        } else if (catalogBackend && catalogBackend === 'filesystem' && providerSelect === 'lakehouse-paimon') {
-          properties = {
-            'catalog-backend': catalogBackend,
-            ...others
-          }
-          uri && (properties['uri'] = uri)
-        } else if (catalogBackend && catalogBackend === 'rest' && providerSelect === 'lakehouse-iceberg') {
-          properties = {
-            'catalog-backend': catalogBackend,
-            uri: uri,
-            ...others
-          }
-        } else {
-          properties = {
-            uri: uri,
-            ...others
-          }
-          catalogBackend && (properties['catalog-backend'] = catalogBackend)
-          jdbcDriver && (properties['jdbc-driver'] = jdbcDriver)
-          jdbcUser && (properties['jdbc-user'] = jdbcUser)
-          jdbcPwd && (properties['jdbc-password'] = jdbcPwd)
-        }
+        properties = { ...others }
+        catalogBackend && (properties['catalog-backend'] = catalogBackend)
+        uri && (properties['uri'] = uri)
+        warehouse && (properties['warehouse'] = warehouse)
+        jdbcDriver && (properties['jdbc-driver'] = jdbcDriver)
+        jdbcUser && (properties['jdbc-user'] = jdbcUser)
+        jdbcPwd && (properties['jdbc-password'] = jdbcPwd)
         authType && (properties['authentication.type'] = authType)
         kerberosPrincipal && (properties['authentication.kerberos.principal'] = kerberosPrincipal)
         kerberosKeytabUri && (properties['authentication.kerberos.keytab-uri'] = kerberosKeytabUri)
@@ -359,8 +339,6 @@ const CreateCatalogDialog = props => {
         break
       }
     }
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [typeSelect, open])
 
   useEffect(() => {
@@ -377,8 +355,6 @@ const CreateCatalogDialog = props => {
       setInnerProps(defaultProps)
       setValue('propItems', defaultProps)
     }
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerSelect])
 
   useEffect(() => {
@@ -435,7 +411,8 @@ const CreateCatalogDialog = props => {
         if (findPropIndex === -1) {
           let propItem = {
             key: item,
-            value: properties[item]
+            value: properties[item],
+            disabled: type === 'update' && item.startsWith('location-') && data.provider === 'fileset'
           }
           propsItems.push(propItem)
         }

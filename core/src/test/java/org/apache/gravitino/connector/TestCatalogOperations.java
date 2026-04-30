@@ -70,6 +70,7 @@ import org.apache.gravitino.exceptions.NoSuchModelVersionURINameException;
 import org.apache.gravitino.exceptions.NoSuchSchemaException;
 import org.apache.gravitino.exceptions.NoSuchTableException;
 import org.apache.gravitino.exceptions.NoSuchTopicException;
+import org.apache.gravitino.exceptions.NoSuchViewException;
 import org.apache.gravitino.exceptions.NonEmptySchemaException;
 import org.apache.gravitino.exceptions.SchemaAlreadyExistsException;
 import org.apache.gravitino.exceptions.TableAlreadyExistsException;
@@ -88,9 +89,13 @@ import org.apache.gravitino.model.ModelChange;
 import org.apache.gravitino.model.ModelVersion;
 import org.apache.gravitino.model.ModelVersionChange;
 import org.apache.gravitino.rel.Column;
+import org.apache.gravitino.rel.Representation;
 import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.TableCatalog;
 import org.apache.gravitino.rel.TableChange;
+import org.apache.gravitino.rel.View;
+import org.apache.gravitino.rel.ViewCatalog;
+import org.apache.gravitino.rel.ViewChange;
 import org.apache.gravitino.rel.expressions.distributions.Distribution;
 import org.apache.gravitino.rel.expressions.sorts.SortOrder;
 import org.apache.gravitino.rel.expressions.transforms.Transform;
@@ -101,6 +106,7 @@ import org.slf4j.LoggerFactory;
 public class TestCatalogOperations
     implements CatalogOperations,
         TableCatalog,
+        ViewCatalog,
         FilesetCatalog,
         TopicCatalog,
         ModelCatalog,
@@ -121,6 +127,8 @@ public class TestCatalogOperations
 
   private final Map<Pair<NameIdentifier, String>, Integer> modelAliasToVersion;
 
+  public final Map<NameIdentifier, View> views;
+
   public static final String FAIL_CREATE = "fail-create";
 
   public static final String FAIL_TEST = "need-fail";
@@ -135,6 +143,7 @@ public class TestCatalogOperations
     models = Maps.newHashMap();
     modelVersions = Maps.newHashMap();
     modelAliasToVersion = Maps.newHashMap();
+    views = Maps.newHashMap();
   }
 
   @Override
@@ -293,6 +302,35 @@ public class TestCatalogOperations
     } else {
       return false;
     }
+  }
+
+  @Override
+  public View createView(
+      NameIdentifier ident,
+      String comment,
+      Column[] columns,
+      Representation[] representations,
+      String defaultCatalog,
+      String defaultSchema,
+      Map<String, String> properties) {
+    throw new UnsupportedOperationException("createView not implemented in test");
+  }
+
+  @Override
+  public View alterView(NameIdentifier ident, ViewChange... changes) {
+    throw new UnsupportedOperationException("alterView not implemented in test");
+  }
+
+  @Override
+  public boolean dropView(NameIdentifier ident) {
+    return views.remove(ident) != null;
+  }
+
+  @Override
+  public NameIdentifier[] listViews(Namespace namespace) {
+    return views.keySet().stream()
+        .filter(ident -> ident.namespace().equals(namespace))
+        .toArray(NameIdentifier[]::new);
   }
 
   @Override
@@ -1133,7 +1171,7 @@ public class TestCatalogOperations
     String newComment = testModelVersion.comment();
     int newVersion = testModelVersion.version();
     String[] newAliases = testModelVersion.aliases();
-    String newUri = testModelVersion.uri();
+    Map<String, String> newUris = Maps.newHashMap(testModelVersion.uris());
 
     for (ModelVersionChange change : changes) {
       if (change instanceof ModelVersionChange.UpdateComment) {
@@ -1162,11 +1200,23 @@ public class TestCatalogOperations
 
       } else if (change instanceof ModelVersionChange.UpdateUri) {
         ModelVersionChange.UpdateUri updateUriChange = (ModelVersionChange.UpdateUri) change;
-        newUri = updateUriChange.newUri();
+        newUris.replace(updateUriChange.uriName(), updateUriChange.newUri());
+
+      } else if (change instanceof ModelVersionChange.AddUri) {
+        ModelVersionChange.AddUri addUriChange = (ModelVersionChange.AddUri) change;
+        newUris.putIfAbsent(addUriChange.uriName(), addUriChange.uri());
+
+      } else if (change instanceof ModelVersionChange.RemoveUri) {
+        ModelVersionChange.RemoveUri removeUriChange = (ModelVersionChange.RemoveUri) change;
+        newUris.remove(removeUriChange.uriName());
 
       } else {
         throw new IllegalArgumentException("Unsupported model version change: " + change);
       }
+    }
+
+    if (newUris.isEmpty()) {
+      throw new IllegalArgumentException("Model version URI cannot be empty");
     }
 
     TestModelVersion updatedModelVersion =
@@ -1175,7 +1225,7 @@ public class TestCatalogOperations
             .withComment(newComment)
             .withProperties(newProps)
             .withAuditInfo(updatedAuditInfo)
-            .withUris(ImmutableMap.of(ModelVersion.URI_NAME_UNKNOWN, newUri))
+            .withUris(newUris)
             .withAliases(newAliases)
             .build();
 
@@ -1403,5 +1453,14 @@ public class TestCatalogOperations
     }
 
     return aliasList.toArray(new String[0]);
+  }
+
+  @Override
+  public View loadView(NameIdentifier ident) throws NoSuchViewException {
+    if (views.containsKey(ident)) {
+      return views.get(ident);
+    } else {
+      throw new NoSuchViewException("View %s does not exist", ident);
+    }
   }
 }

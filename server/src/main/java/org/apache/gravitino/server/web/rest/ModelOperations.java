@@ -20,7 +20,11 @@ package org.apache.gravitino.server.web.rest;
 
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
+import com.google.common.collect.ImmutableMap;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Optional;
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.DELETE;
@@ -52,15 +56,17 @@ import org.apache.gravitino.dto.responses.ModelResponse;
 import org.apache.gravitino.dto.responses.ModelVersionInfoListResponse;
 import org.apache.gravitino.dto.responses.ModelVersionListResponse;
 import org.apache.gravitino.dto.responses.ModelVersionResponse;
+import org.apache.gravitino.dto.responses.ModelVersionUriResponse;
 import org.apache.gravitino.dto.util.DTOConverters;
 import org.apache.gravitino.metrics.MetricNames;
 import org.apache.gravitino.model.Model;
 import org.apache.gravitino.model.ModelChange;
 import org.apache.gravitino.model.ModelVersion;
 import org.apache.gravitino.model.ModelVersionChange;
-import org.apache.gravitino.server.authorization.MetadataFilterHelper;
+import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
+import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
@@ -71,11 +77,6 @@ import org.slf4j.LoggerFactory;
 public class ModelOperations {
 
   private static final Logger LOG = LoggerFactory.getLogger(ModelOperations.class);
-
-  private static final String loadModelAuthorizationExpression =
-      "ANY(OWNER, METALAKE, CATALOG) ||"
-          + " SCHEMA_OWNER_WITH_USE_CATALOG || "
-          + " ANY_USE_CATALOG && ANY_USE_SCHEMA && (MODEL::OWNER || ANY_USE_MODEL)";
 
   private final ModelDispatcher modelDispatcher;
 
@@ -90,10 +91,14 @@ public class ModelOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "list-model." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "list-model", absolute = true)
+  @AuthorizationExpression(
+      expression = AuthorizationExpressionConstants.LOAD_SCHEMA_AUTHORIZATION_EXPRESSION,
+      accessMetadataType = MetadataObject.Type.SCHEMA)
   public Response listModels(
-      @PathParam("metalake") String metalake,
-      @PathParam("catalog") String catalog,
-      @PathParam("schema") String schema) {
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("catalog") @AuthorizationMetadata(type = Entity.EntityType.CATALOG) String catalog,
+      @PathParam("schema") @AuthorizationMetadata(type = Entity.EntityType.SCHEMA) String schema) {
     LOG.info("Received list models request for schema: {}.{}.{}", metalake, catalog, schema);
     Namespace modelNs = NamespaceUtil.ofModel(metalake, catalog, schema);
 
@@ -104,8 +109,11 @@ public class ModelOperations {
             NameIdentifier[] modelIds = modelDispatcher.listModels(modelNs);
             modelIds = modelIds == null ? new NameIdentifier[0] : modelIds;
             modelIds =
-                MetadataFilterHelper.filterByExpression(
-                    metalake, loadModelAuthorizationExpression, Entity.EntityType.MODEL, modelIds);
+                MetadataAuthzHelper.filterByExpression(
+                    metalake,
+                    AuthorizationExpressionConstants.FILTER_MODEL_AUTHORIZATION_EXPRESSION,
+                    Entity.EntityType.MODEL,
+                    modelIds);
             LOG.info("List {} models under schema {}", modelIds.length, modelNs);
             return Utils.ok(new EntityListResponse(modelIds));
           });
@@ -121,7 +129,7 @@ public class ModelOperations {
   @Timed(name = "get-model." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-model", absolute = true)
   @AuthorizationExpression(
-      expression = loadModelAuthorizationExpression,
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response getModel(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -152,9 +160,11 @@ public class ModelOperations {
   @ResponseMetered(name = "register-model", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && ANY_CREATE_MODEL",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && ANY_REGISTER_MODEL
+                      """,
       accessMetadataType = MetadataObject.Type.SCHEMA)
   public Response registerModel(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -170,13 +180,12 @@ public class ModelOperations {
         request.getName());
 
     try {
-      request.validate();
-      NameIdentifier modelId =
-          NameIdentifierUtil.ofModel(metalake, catalog, schema, request.getName());
-
       return Utils.doAs(
           httpRequest,
           () -> {
+            request.validate();
+            NameIdentifier modelId =
+                NameIdentifierUtil.ofModel(metalake, catalog, schema, request.getName());
             Model m =
                 modelDispatcher.registerModel(
                     modelId, request.getComment(), request.getProperties());
@@ -197,9 +206,11 @@ public class ModelOperations {
   @ResponseMetered(name = "delete-model", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response deleteModel(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -234,11 +245,15 @@ public class ModelOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "list-model-versions." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "list-model-versions", absolute = true)
+  @AuthorizationExpression(
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
+      accessMetadataType = MetadataObject.Type.MODEL)
   public Response listModelVersions(
-      @PathParam("metalake") String metalake,
-      @PathParam("catalog") String catalog,
-      @PathParam("schema") String schema,
-      @PathParam("model") String model,
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("catalog") @AuthorizationMetadata(type = Entity.EntityType.CATALOG) String catalog,
+      @PathParam("schema") @AuthorizationMetadata(type = Entity.EntityType.SCHEMA) String schema,
+      @PathParam("model") @AuthorizationMetadata(type = Entity.EntityType.MODEL) String model,
       @QueryParam("details") @DefaultValue("false") boolean verbose) {
     LOG.info("Received list model versions request: {}.{}.{}.{}", metalake, catalog, schema, model);
     NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
@@ -259,9 +274,10 @@ public class ModelOperations {
                                   NameIdentifierUtil.ofModelVersion(
                                       metalake, catalog, schema, model, modelVersion.version())
                                 };
-                            return MetadataFilterHelper.filterByExpression(
+                            return MetadataAuthzHelper.filterByExpression(
                                         metalake,
-                                        loadModelAuthorizationExpression,
+                                        AuthorizationExpressionConstants
+                                            .LOAD_MODEL_AUTHORIZATION_EXPRESSION,
                                         Entity.EntityType.MODEL_VERSION,
                                         nameIdentifiers)
                                     .length
@@ -283,9 +299,10 @@ public class ModelOperations {
                                   NameIdentifierUtil.ofModelVersion(
                                       metalake, catalog, schema, model, modelVersion)
                                 };
-                            return MetadataFilterHelper.filterByExpression(
+                            return MetadataAuthzHelper.filterByExpression(
                                         metalake,
-                                        loadModelAuthorizationExpression,
+                                        AuthorizationExpressionConstants
+                                            .LOAD_MODEL_AUTHORIZATION_EXPRESSION,
                                         Entity.EntityType.MODEL_VERSION,
                                         nameIdentifiers)
                                     .length
@@ -308,7 +325,7 @@ public class ModelOperations {
   @Timed(name = "get-model-version." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-model-version", absolute = true)
   @AuthorizationExpression(
-      expression = loadModelAuthorizationExpression,
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response getModelVersion(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -347,7 +364,7 @@ public class ModelOperations {
   @Timed(name = "get-model-alias." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-model-alias", absolute = true)
   @AuthorizationExpression(
-      expression = loadModelAuthorizationExpression,
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response getModelVersionByAlias(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -387,9 +404,11 @@ public class ModelOperations {
   @ResponseMetered(name = "link-model-version", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && (MODEL::OWNER || ANY_USE_MODEL && ANY_CREATE_MODEL_VERSION)",
+          """
+                    ANY(OWNER, METALAKE, CATALOG) ||
+                    SCHEMA_OWNER_WITH_USE_CATALOG ||
+                    ANY_USE_CATALOG && ANY_USE_SCHEMA && (MODEL::OWNER || ANY_USE_MODEL && ANY_LINK_MODEL_VERSION)
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response linkModelVersion(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -402,14 +421,19 @@ public class ModelOperations {
     NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
 
     try {
-      request.validate();
-
       return Utils.doAs(
           httpRequest,
           () -> {
+            request.validate();
+            Map<String, String> tmpUris =
+                Optional.ofNullable(request.getUris()).orElse(Collections.emptyMap());
+            ImmutableMap.Builder<String, String> uris =
+                ImmutableMap.<String, String>builder().putAll(tmpUris);
+            Optional.ofNullable(request.getUri())
+                .ifPresent(uri -> uris.put(ModelVersion.URI_NAME_UNKNOWN, uri));
             modelDispatcher.linkModelVersion(
                 modelId,
-                request.getUri(),
+                uris.buildKeepingLast(),
                 request.getAliases(),
                 request.getComment(),
                 request.getProperties());
@@ -429,9 +453,11 @@ public class ModelOperations {
   @ResponseMetered(name = "delete-model-version", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response deleteModelVersion(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -476,9 +502,11 @@ public class ModelOperations {
   @ResponseMetered(name = "delete-model-alias", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response deleteModelVersionByAlias(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -524,9 +552,11 @@ public class ModelOperations {
   @ResponseMetered(name = "alter-model-version", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response alterModelVersion(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -543,7 +573,6 @@ public class ModelOperations {
         schema,
         model,
         version);
-    request.validate();
 
     try {
       NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
@@ -577,9 +606,11 @@ public class ModelOperations {
   @ResponseMetered(name = "alter-model-alias", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                     ANY(OWNER, METALAKE, CATALOG) ||
+                     SCHEMA_OWNER_WITH_USE_CATALOG ||
+                     ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response alterModelVersionByAlias(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -596,7 +627,6 @@ public class ModelOperations {
         schema,
         model,
         alias);
-    request.validate();
 
     try {
       NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
@@ -629,9 +659,11 @@ public class ModelOperations {
   @ResponseMetered(name = "alter-model", absolute = true)
   @AuthorizationExpression(
       expression =
-          " ANY(OWNER, METALAKE, CATALOG) || "
-              + "SCHEMA_OWNER_WITH_USE_CATALOG || "
-              + "ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER",
+          """
+                      ANY(OWNER, METALAKE, CATALOG) ||
+                      SCHEMA_OWNER_WITH_USE_CATALOG ||
+                      ANY_USE_CATALOG && ANY_USE_SCHEMA && MODEL::OWNER
+                      """,
       accessMetadataType = MetadataObject.Type.MODEL)
   public Response alterModel(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
@@ -659,6 +691,86 @@ public class ModelOperations {
 
     } catch (Exception e) {
       return ExceptionHandlers.handleModelException(OperationType.ALTER, model, schema, e);
+    }
+  }
+
+  @GET
+  @Path("{model}/versions/{version}/uri")
+  @Produces("application/vnd.gravitino.v1+json")
+  @Timed(name = "get-model-version-uri." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
+  @ResponseMetered(name = "get-model-version-uri", absolute = true)
+  @AuthorizationExpression(
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
+      accessMetadataType = MetadataObject.Type.MODEL)
+  public Response getModelVersionUri(
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("catalog") @AuthorizationMetadata(type = Entity.EntityType.CATALOG) String catalog,
+      @PathParam("schema") @AuthorizationMetadata(type = Entity.EntityType.SCHEMA) String schema,
+      @PathParam("model") @AuthorizationMetadata(type = Entity.EntityType.MODEL) String model,
+      @PathParam("version") int version,
+      @QueryParam("uriName") String uriName) {
+    LOG.info(
+        "Received get model version uri request: {}.{}.{}.{}.{}, uriName: {}",
+        metalake,
+        catalog,
+        schema,
+        model,
+        version,
+        uriName);
+    NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
+
+    try {
+      return Utils.doAs(
+          httpRequest,
+          () -> {
+            String uri = modelDispatcher.getModelVersionUri(modelId, version, uriName);
+            return Utils.ok(new ModelVersionUriResponse(uri));
+          });
+
+    } catch (Exception e) {
+      return ExceptionHandlers.handleModelException(
+          OperationType.GET, versionString(model, version), schema, e);
+    }
+  }
+
+  @GET
+  @Path("{model}/aliases/{alias}/uri")
+  @Produces("application/vnd.gravitino.v1+json")
+  @Timed(name = "get-model-alias-uri." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
+  @ResponseMetered(name = "get-model-alias-uri", absolute = true)
+  @AuthorizationExpression(
+      expression = AuthorizationExpressionConstants.LOAD_MODEL_AUTHORIZATION_EXPRESSION,
+      accessMetadataType = MetadataObject.Type.MODEL)
+  public Response getModelVersionUriByAlias(
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("catalog") @AuthorizationMetadata(type = Entity.EntityType.CATALOG) String catalog,
+      @PathParam("schema") @AuthorizationMetadata(type = Entity.EntityType.SCHEMA) String schema,
+      @PathParam("model") @AuthorizationMetadata(type = Entity.EntityType.MODEL) String model,
+      @PathParam("alias") String alias,
+      @QueryParam("uriName") String uriName) {
+    LOG.info(
+        "Received get model version alias uri request: {}.{}.{}.{}.{}, uriName: {}",
+        metalake,
+        catalog,
+        schema,
+        model,
+        alias,
+        uriName);
+    NameIdentifier modelId = NameIdentifierUtil.ofModel(metalake, catalog, schema, model);
+
+    try {
+      return Utils.doAs(
+          httpRequest,
+          () -> {
+            String uri = modelDispatcher.getModelVersionUri(modelId, alias, uriName);
+            return Utils.ok(new ModelVersionUriResponse(uri));
+          });
+
+    } catch (Exception e) {
+      return ExceptionHandlers.handleModelException(
+          OperationType.GET, aliasString(model, alias), schema, e);
     }
   }
 

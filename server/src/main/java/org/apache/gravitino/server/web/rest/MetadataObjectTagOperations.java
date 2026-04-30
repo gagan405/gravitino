@@ -18,14 +18,17 @@
  */
 package org.apache.gravitino.server.web.rest;
 
+import static org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants.CAN_ACCESS_METADATA;
+import static org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants.CAN_ACCESS_METADATA_AND_TAG;
+
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
-import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import javax.inject.Inject;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.DefaultValue;
@@ -38,6 +41,7 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.ArrayUtils;
+import org.apache.gravitino.Entity;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.MetadataObjects;
 import org.apache.gravitino.dto.requests.TagsAssociateRequest;
@@ -48,9 +52,17 @@ import org.apache.gravitino.dto.tag.TagDTO;
 import org.apache.gravitino.dto.util.DTOConverters;
 import org.apache.gravitino.exceptions.NoSuchTagException;
 import org.apache.gravitino.metrics.MetricNames;
+import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationFullName;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationObjectType;
+import org.apache.gravitino.server.authorization.annotations.AuthorizationRequest;
+import org.apache.gravitino.server.authorization.expression.AuthorizationExpressionConstants;
 import org.apache.gravitino.server.web.Utils;
 import org.apache.gravitino.tag.Tag;
 import org.apache.gravitino.tag.TagDispatcher;
+import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -77,11 +89,14 @@ public class MetadataObjectTagOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "get-object-tag." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-object-tag", absolute = true)
+  @AuthorizationExpression(
+      expression = "METALAKE::OWNER || ((TAG::OWNER || ANY_APPLY_TAG) && CAN_ACCESS_METADATA)")
   public Response getTagForObject(
-      @PathParam("metalake") String metalake,
-      @PathParam("type") String type,
-      @PathParam("fullName") String fullName,
-      @PathParam("tag") String tagName) {
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("type") @AuthorizationObjectType String type,
+      @PathParam("fullName") @AuthorizationFullName String fullName,
+      @PathParam("tag") @AuthorizationMetadata(type = Entity.EntityType.TAG) String tagName) {
     LOG.info(
         "Received get tag {} request for object type: {}, full name: {} under metalake: {}",
         tagName,
@@ -143,10 +158,12 @@ public class MetadataObjectTagOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "list-object-tags." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "list-object-tags", absolute = true)
+  @AuthorizationExpression(expression = CAN_ACCESS_METADATA)
   public Response listTagsForMetadataObject(
-      @PathParam("metalake") String metalake,
-      @PathParam("type") String type,
-      @PathParam("fullName") String fullName,
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("type") @AuthorizationObjectType String type,
+      @PathParam("fullName") @AuthorizationFullName String fullName,
       @QueryParam("details") @DefaultValue("false") boolean verbose) {
     LOG.info(
         "Received list tag {} request for object type: {}, full name: {} under metalake: {}",
@@ -163,7 +180,7 @@ public class MetadataObjectTagOperations {
                 MetadataObjects.parse(
                     fullName, MetadataObject.Type.valueOf(type.toUpperCase(Locale.ROOT)));
 
-            List<TagDTO> tags = Lists.newArrayList();
+            Set<TagDTO> tags = Sets.newHashSet();
             Tag[] nonInheritedTags = tagDispatcher.listTagsInfoForMetadataObject(metalake, object);
             if (ArrayUtils.isNotEmpty(nonInheritedTags)) {
               Collections.addAll(
@@ -194,13 +211,26 @@ public class MetadataObjectTagOperations {
                   type,
                   fullName,
                   metalake);
-              return Utils.ok(new TagListResponse(tags.toArray(new TagDTO[0])));
+              TagDTO[] tagDTOS = tags.toArray(new TagDTO[0]);
+              tagDTOS =
+                  MetadataAuthzHelper.filterByExpression(
+                      metalake,
+                      AuthorizationExpressionConstants.LOAD_TAG_AUTHORIZATION_EXPRESSION,
+                      Entity.EntityType.TAG,
+                      tagDTOS,
+                      tagDTO -> NameIdentifierUtil.ofTag(metalake, tagDTO.name()));
+              return Utils.ok(new TagListResponse(tagDTOS));
 
             } else {
-              // Due to same name tag will be associated to both parent and child objects, so we
-              // need to deduplicate the tag names.
-              String[] tagNames = tags.stream().map(TagDTO::name).distinct().toArray(String[]::new);
-
+              // We have used Set to avoid duplicate tag names
+              String[] tagNames = tags.stream().map(TagDTO::name).toArray(String[]::new);
+              tagNames =
+                  MetadataAuthzHelper.filterByExpression(
+                      metalake,
+                      AuthorizationExpressionConstants.LOAD_TAG_AUTHORIZATION_EXPRESSION,
+                      Entity.EntityType.TAG,
+                      tagNames,
+                      tagName -> NameIdentifierUtil.ofTag(metalake, tagName));
               LOG.info(
                   "List {} tags for object type: {}, full name: {} under metalake: {}",
                   tagNames.length,
@@ -220,17 +250,19 @@ public class MetadataObjectTagOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "associate-object-tags." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "associate-object-tags", absolute = true)
+  @AuthorizationExpression(expression = CAN_ACCESS_METADATA_AND_TAG)
   public Response associateTagsForObject(
-      @PathParam("metalake") String metalake,
-      @PathParam("type") String type,
-      @PathParam("fullName") String fullName,
-      TagsAssociateRequest request) {
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
+      @PathParam("type") @AuthorizationObjectType String type,
+      @PathParam("fullName") @AuthorizationFullName String fullName,
+      @AuthorizationRequest(type = AuthorizationRequest.RequestType.ASSOCIATE_TAG)
+          TagsAssociateRequest request) {
     LOG.info(
         "Received associate tags request for object type: {}, full name: {} under metalake: {}",
         type,
         fullName,
         metalake);
-
     try {
       return Utils.doAs(
           httpRequest,
@@ -243,7 +275,6 @@ public class MetadataObjectTagOperations {
                 tagDispatcher.associateTagsForMetadataObject(
                     metalake, object, request.getTagsToAdd(), request.getTagsToRemove());
             tagNames = tagNames == null ? new String[0] : tagNames;
-
             LOG.info(
                 "Associated tags: {} for object type: {}, full name: {} under metalake: {}",
                 Arrays.toString(tagNames),
@@ -252,7 +283,6 @@ public class MetadataObjectTagOperations {
                 metalake);
             return Utils.ok(new NameListResponse(tagNames));
           });
-
     } catch (Exception e) {
       return ExceptionHandlers.handleTagException(OperationType.ASSOCIATE, "", fullName, e);
     }

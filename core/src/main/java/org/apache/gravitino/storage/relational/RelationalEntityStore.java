@@ -20,27 +20,34 @@ package org.apache.gravitino.storage.relational;
 
 import static org.apache.gravitino.Configs.ENTITY_RELATIONAL_STORE;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.Configs;
 import org.apache.gravitino.Entity;
 import org.apache.gravitino.EntityAlreadyExistsException;
 import org.apache.gravitino.EntityStore;
 import org.apache.gravitino.HasIdentifier;
-import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
+import org.apache.gravitino.RelationalEntity;
 import org.apache.gravitino.SupportsRelationOperations;
 import org.apache.gravitino.cache.CacheFactory;
+import org.apache.gravitino.cache.CachedEntityIdResolver;
 import org.apache.gravitino.cache.EntityCache;
+import org.apache.gravitino.cache.EntityCacheKey;
+import org.apache.gravitino.cache.EntityCacheRelationKey;
 import org.apache.gravitino.cache.NoOpsCache;
 import org.apache.gravitino.exceptions.NoSuchEntityException;
-import org.apache.gravitino.meta.TagEntity;
-import org.apache.gravitino.tag.SupportsTagOperations;
+import org.apache.gravitino.storage.relational.service.EntityIdService;
 import org.apache.gravitino.utils.Executable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,8 +57,7 @@ import org.slf4j.LoggerFactory;
  * MySQL, PostgreSQL, etc. If you want to use a different backend, you can implement the {@link
  * RelationalBackend} interface
  */
-public class RelationalEntityStore
-    implements EntityStore, SupportsTagOperations, SupportsRelationOperations {
+public class RelationalEntityStore implements EntityStore, SupportsRelationOperations {
   private static final Logger LOGGER = LoggerFactory.getLogger(RelationalEntityStore.class);
   public static final ImmutableMap<String, String> RELATIONAL_BACKENDS =
       ImmutableMap.of(
@@ -60,18 +66,28 @@ public class RelationalEntityStore
   private RelationalGarbageCollector garbageCollector;
   private EntityCache cache;
 
+  @VisibleForTesting
+  public EntityCache getCache() {
+    return cache;
+  }
+
   @Override
   public void initialize(Config config) throws RuntimeException {
+    if (config.get(Configs.CACHE_ENABLED)) {
+      this.cache = CacheFactory.getEntityCache(config);
+      EntityIdService.initialize(
+          new CachedEntityIdResolver(cache, new RelationalEntityStoreIdResolver()));
+    } else {
+      this.cache = new NoOpsCache(config);
+      EntityIdService.initialize(new RelationalEntityStoreIdResolver());
+    }
+
     this.backend = createRelationalEntityBackend(config);
     this.garbageCollector = new RelationalGarbageCollector(backend, config);
     this.garbageCollector.start();
-    this.cache =
-        config.get(Configs.CACHE_ENABLED)
-            ? CacheFactory.getEntityCache(config)
-            : new NoOpsCache(config);
   }
 
-  private static RelationalBackend createRelationalEntityBackend(Config config) {
+  private RelationalBackend createRelationalEntityBackend(Config config) {
     String backendName = config.get(ENTITY_RELATIONAL_STORE);
     String className =
         RELATIONAL_BACKENDS.getOrDefault(backendName, Configs.DEFAULT_ENTITY_RELATIONAL_STORE);
@@ -80,6 +96,7 @@ public class RelationalEntityStore
       RelationalBackend relationalBackend =
           (RelationalBackend) Class.forName(className).getDeclaredConstructor().newInstance();
       relationalBackend.initialize(config);
+
       return relationalBackend;
     } catch (Exception e) {
       LOGGER.error(
@@ -128,6 +145,7 @@ public class RelationalEntityStore
       NameIdentifier ident, Entity.EntityType entityType, Class<E> e)
       throws NoSuchEntityException, IOException {
     return cache.withCacheLock(
+        EntityCacheRelationKey.of(ident, entityType),
         () -> {
           Optional<E> entityFromCache = cache.getIfPresent(ident, entityType);
           if (entityFromCache.isPresent()) {
@@ -138,6 +156,27 @@ public class RelationalEntityStore
           cache.put(entity);
           return entity;
         });
+  }
+
+  @Override
+  public <E extends Entity & HasIdentifier> List<E> batchGet(
+      List<NameIdentifier> idents, Entity.EntityType entityType, Class<E> clazz) {
+    List<E> allEntities = new ArrayList<>();
+    List<NameIdentifier> noCacheIdents =
+        idents.stream()
+            .filter(
+                ident -> {
+                  Optional<E> entity = cache.getIfPresent(ident, entityType);
+                  entity.ifPresent(allEntities::add);
+                  return entity.isEmpty();
+                })
+            .toList();
+    List<E> fetchEntities = backend.batchGet(noCacheIdents, entityType);
+    for (E entity : fetchEntities) {
+      cache.put(entity);
+      allEntities.add(entity);
+    }
+    return allEntities;
   }
 
   @Override
@@ -164,44 +203,8 @@ public class RelationalEntityStore
   }
 
   @Override
-  public SupportsTagOperations tagOperations() {
-    return this;
-  }
-
-  @Override
   public SupportsRelationOperations relationOperations() {
     return this;
-  }
-
-  @Override
-  public List<MetadataObject> listAssociatedMetadataObjectsForTag(NameIdentifier tagIdent)
-      throws IOException {
-    return backend.listAssociatedMetadataObjectsForTag(tagIdent);
-  }
-
-  @Override
-  public List<TagEntity> listAssociatedTagsForMetadataObject(
-      NameIdentifier objectIdent, Entity.EntityType objectType)
-      throws NoSuchEntityException, IOException {
-    return backend.listAssociatedTagsForMetadataObject(objectIdent, objectType);
-  }
-
-  @Override
-  public TagEntity getTagForMetadataObject(
-      NameIdentifier objectIdent, Entity.EntityType objectType, NameIdentifier tagIdent)
-      throws NoSuchEntityException, IOException {
-    return backend.getTagForMetadataObject(objectIdent, objectType, tagIdent);
-  }
-
-  @Override
-  public List<TagEntity> associateTagsWithMetadataObject(
-      NameIdentifier objectIdent,
-      Entity.EntityType objectType,
-      NameIdentifier[] tagsToAdd,
-      NameIdentifier[] tagsToRemove)
-      throws NoSuchEntityException, EntityAlreadyExistsException, IOException {
-    return backend.associateTagsWithMetadataObject(
-        objectIdent, objectType, tagsToAdd, tagsToRemove);
   }
 
   @Override
@@ -209,18 +212,101 @@ public class RelationalEntityStore
       Type relType, NameIdentifier nameIdentifier, Entity.EntityType identType, boolean allFields)
       throws IOException {
     return cache.withCacheLock(
+        EntityCacheRelationKey.of(nameIdentifier, identType, relType),
         () -> {
           Optional<List<E>> entities = cache.getIfPresent(relType, nameIdentifier, identType);
           if (entities.isPresent()) {
             return entities.get();
           }
 
+          // Use allFields=true to cache complete entities
           List<E> backendEntities =
-              backend.listEntitiesByRelation(relType, nameIdentifier, identType, allFields);
+              backend.listEntitiesByRelation(relType, nameIdentifier, identType, true);
 
           cache.put(nameIdentifier, identType, relType, backendEntities);
 
           return backendEntities;
+        });
+  }
+
+  @Override
+  public List<RelationalEntity<?>> batchListEntitiesByRelation(
+      Type relType, List<NameIdentifier> nameIdentifiers, Entity.EntityType identType)
+      throws IOException {
+    if (nameIdentifiers == null || nameIdentifiers.isEmpty()) {
+      return new ArrayList<>();
+    }
+
+    List<EntityCacheKey> lockKeys = new ArrayList<>();
+    for (NameIdentifier id : nameIdentifiers) {
+      lockKeys.add(EntityCacheRelationKey.of(id, identType, relType));
+    }
+
+    return cache.withMultipleKeyCacheLock(
+        lockKeys,
+        () -> {
+          List<RelationalEntity<?>> result = new ArrayList<>();
+          List<NameIdentifier> uncachedIdentifiers = new ArrayList<>();
+
+          for (NameIdentifier nameIdentifier : nameIdentifiers) {
+            Optional<List<RelationalEntity<?>>> cachedRelations =
+                getCachedRelations(relType, nameIdentifier, identType);
+            if (cachedRelations.isPresent()) {
+              result.addAll(cachedRelations.get());
+            } else {
+              uncachedIdentifiers.add(nameIdentifier);
+            }
+          }
+
+          if (!uncachedIdentifiers.isEmpty()) {
+            List<RelationalEntity<?>> backendRelations =
+                backend.batchListEntitiesByRelation(relType, uncachedIdentifiers, identType);
+            result.addAll(backendRelations);
+
+            batchPopulateRelationCache(relType, identType, uncachedIdentifiers, backendRelations);
+          }
+
+          return result;
+        });
+  }
+
+  @Override
+  public <E extends Entity & HasIdentifier> E getEntityByRelation(
+      Type relType,
+      NameIdentifier srcIdentifier,
+      Entity.EntityType srcType,
+      NameIdentifier destEntityIdent)
+      throws IOException, NoSuchEntityException {
+    return cache.withCacheLock(
+        EntityCacheRelationKey.of(srcIdentifier, srcType, relType),
+        () -> {
+          Optional<List<E>> entities = cache.getIfPresent(relType, srcIdentifier, srcType);
+          if (entities.isPresent()) {
+            return entities.get().stream()
+                .filter(e -> e.nameIdentifier().equals(destEntityIdent))
+                .findFirst()
+                .orElseThrow(
+                    () ->
+                        new NoSuchEntityException(
+                            "No such entity with ident: %s", destEntityIdent));
+          }
+
+          // Use allFields=true to cache complete entities
+          List<E> backendEntities =
+              backend.listEntitiesByRelation(relType, srcIdentifier, srcType, true);
+
+          E r =
+              backendEntities.stream()
+                  .filter(e -> e.nameIdentifier().equals(destEntityIdent))
+                  .findFirst()
+                  .orElseThrow(
+                      () ->
+                          new NoSuchEntityException(
+                              "No such entity with ident: %s", destEntityIdent));
+
+          cache.put(srcIdentifier, srcType, relType, backendEntities);
+
+          return r;
         });
   }
 
@@ -234,6 +320,87 @@ public class RelationalEntityStore
       boolean override)
       throws IOException {
     cache.invalidate(srcIdentifier, srcType, relType);
+    cache.invalidate(dstIdentifier, dstType, relType);
     backend.insertRelation(relType, srcIdentifier, srcType, dstIdentifier, dstType, override);
+  }
+
+  @Override
+  public <E extends Entity & HasIdentifier> List<E> updateEntityRelations(
+      Type relType,
+      NameIdentifier srcEntityIdent,
+      Entity.EntityType srcEntityType,
+      NameIdentifier[] destEntitiesToAdd,
+      NameIdentifier[] destEntitiesToRemove)
+      throws IOException, NoSuchEntityException, EntityAlreadyExistsException {
+
+    // We need to clear the cache of the source entity and all destination entities being added or
+    // removed. This ensures that any subsequent reads will fetch the updated relations from the
+    // backend. For example, if we are adding a tag to table, we need to invalidate the cache for
+    // that table and the tag being added or removed. Otherwise, we might return stale data if we
+    // list all tags for that table or all tables for that tag.
+    cache.invalidate(srcEntityIdent, srcEntityType, relType);
+    for (NameIdentifier destToAdd : destEntitiesToAdd) {
+      cache.invalidate(destToAdd, srcEntityType, relType);
+    }
+
+    for (NameIdentifier destToRemove : destEntitiesToRemove) {
+      cache.invalidate(destToRemove, srcEntityType, relType);
+    }
+
+    return backend.updateEntityRelations(
+        relType, srcEntityIdent, srcEntityType, destEntitiesToAdd, destEntitiesToRemove);
+  }
+
+  @Override
+  public int batchDelete(
+      List<Pair<NameIdentifier, Entity.EntityType>> entitiesToDelete, boolean cascade)
+      throws IOException {
+    return backend.batchDelete(entitiesToDelete, cascade);
+  }
+
+  @Override
+  public <E extends Entity & HasIdentifier> void batchPut(List<E> entities, boolean overwritten)
+      throws IOException, EntityAlreadyExistsException {
+    backend.batchPut(entities, overwritten);
+  }
+
+  private <E extends Entity & HasIdentifier> Optional<List<RelationalEntity<?>>> getCachedRelations(
+      SupportsRelationOperations.Type relType,
+      NameIdentifier nameIdentifier,
+      Entity.EntityType identType) {
+    Optional<List<E>> entitiesOpt = cache.getIfPresent(relType, nameIdentifier, identType);
+    if (entitiesOpt.isPresent()) {
+      List<RelationalEntity<?>> cachedRelations = new ArrayList<>();
+      for (E entity : entitiesOpt.get()) {
+        cachedRelations.add(new RelationalEntity<>(relType, nameIdentifier, identType, entity));
+      }
+      return Optional.of(cachedRelations);
+    }
+    return Optional.empty();
+  }
+
+  private <E extends Entity & HasIdentifier> void batchPopulateRelationCache(
+      SupportsRelationOperations.Type relType,
+      Entity.EntityType identType,
+      List<NameIdentifier> uncachedIdentifiers,
+      List<RelationalEntity<?>> backendRelations) {
+    Map<NameIdentifier, List<RelationalEntity<?>>> relationsBySource = new HashMap<>();
+    for (RelationalEntity<?> relation : backendRelations) {
+      relationsBySource.computeIfAbsent(relation.source(), k -> new ArrayList<>()).add(relation);
+    }
+
+    for (NameIdentifier sourceId : uncachedIdentifiers) {
+      List<RelationalEntity<?>> sourceRelations = relationsBySource.get(sourceId);
+      List<E> entityList = new ArrayList<>();
+      if (sourceRelations != null) {
+        for (RelationalEntity<?> rel : sourceRelations) {
+          @SuppressWarnings("unchecked")
+          E entity = (E) rel.targetEntity();
+          entityList.add(entity);
+        }
+      }
+
+      cache.put(sourceId, identType, relType, entityList);
+    }
   }
 }

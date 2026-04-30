@@ -29,6 +29,7 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Collections;
+import java.util.Optional;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.Application;
@@ -36,9 +37,13 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import org.apache.commons.lang3.reflect.FieldUtils;
 import org.apache.gravitino.Config;
+import org.apache.gravitino.EntityStore;
 import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.authorization.AccessControlManager;
+import org.apache.gravitino.authorization.Owner;
+import org.apache.gravitino.authorization.OwnerDispatcher;
 import org.apache.gravitino.authorization.User;
+import org.apache.gravitino.connector.PropertiesMetadata;
 import org.apache.gravitino.dto.authorization.UserDTO;
 import org.apache.gravitino.dto.requests.UserAddRequest;
 import org.apache.gravitino.dto.responses.ErrorConstants;
@@ -47,11 +52,13 @@ import org.apache.gravitino.dto.responses.NameListResponse;
 import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.dto.responses.UserListResponse;
 import org.apache.gravitino.dto.responses.UserResponse;
+import org.apache.gravitino.exceptions.NoSuchEntityException;
 import org.apache.gravitino.exceptions.NoSuchMetalakeException;
 import org.apache.gravitino.exceptions.NoSuchUserException;
 import org.apache.gravitino.exceptions.UserAlreadyExistsException;
 import org.apache.gravitino.lock.LockManager;
 import org.apache.gravitino.meta.AuditInfo;
+import org.apache.gravitino.meta.BaseMetalake;
 import org.apache.gravitino.meta.UserEntity;
 import org.apache.gravitino.rest.RESTUtils;
 import org.glassfish.hk2.utilities.binding.AbstractBinder;
@@ -65,6 +72,8 @@ import org.mockito.Mockito;
 public class TestUserOperations extends BaseOperationsTest {
 
   private static final AccessControlManager manager = mock(AccessControlManager.class);
+  private static final OwnerDispatcher ownerDispatcher = mock(OwnerDispatcher.class);
+  private static final EntityStore entityStore = mock(EntityStore.class);
 
   private static class MockServletRequestFactory extends ServletRequestFactoryBase {
     @Override
@@ -83,6 +92,8 @@ public class TestUserOperations extends BaseOperationsTest {
     Mockito.doReturn(36000L).when(config).get(TREE_LOCK_CLEAN_INTERVAL);
     FieldUtils.writeField(GravitinoEnv.getInstance(), "lockManager", new LockManager(config), true);
     FieldUtils.writeField(GravitinoEnv.getInstance(), "accessControlDispatcher", manager, true);
+    FieldUtils.writeField(GravitinoEnv.getInstance(), "ownerDispatcher", ownerDispatcher, true);
+    FieldUtils.writeField(GravitinoEnv.getInstance(), "entityStore", entityStore, true);
   }
 
   @Override
@@ -108,11 +119,18 @@ public class TestUserOperations extends BaseOperationsTest {
   }
 
   @Test
-  public void testAddUser() {
+  public void testAddUser() throws IOException {
     UserAddRequest req = new UserAddRequest("user1");
     User user = buildUser("user1");
 
     when(manager.addUser(any(), any())).thenReturn(user);
+
+    // Mock metalake with in-use property
+    BaseMetalake metalake = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata = mock(PropertiesMetadata.class);
+    when(propertiesMetadata.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake.propertiesMetadata()).thenReturn(propertiesMetadata);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake);
 
     // test with IllegalRequest
     UserAddRequest illegalReq = new UserAddRequest("");
@@ -141,7 +159,7 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertTrue(userDTO.roles().isEmpty());
 
     // Test to throw NoSuchMetalakeException
-    doThrow(new NoSuchMetalakeException("mock error")).when(manager).addUser(any(), any());
+    doThrow(new NoSuchEntityException("mock error")).when(entityStore).get(any(), any(), any());
     Response resp1 =
         target("/metalakes/metalake1/users")
             .request(MediaType.APPLICATION_JSON_TYPE)
@@ -156,6 +174,12 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals(NoSuchMetalakeException.class.getSimpleName(), errorResponse.getType());
 
     // Test to throw UserAlreadyExistsException
+    Mockito.reset(entityStore);
+    BaseMetalake metalake1 = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata1 = mock(PropertiesMetadata.class);
+    when(propertiesMetadata1.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake1.propertiesMetadata()).thenReturn(propertiesMetadata1);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake1);
     doThrow(new UserAlreadyExistsException("mock error")).when(manager).addUser(any(), any());
     Response resp2 =
         target("/metalakes/metalake1/users")
@@ -187,11 +211,18 @@ public class TestUserOperations extends BaseOperationsTest {
   }
 
   @Test
-  public void testGetUser() {
+  public void testGetUser() throws IOException {
 
     User user = buildUser("user1");
 
     when(manager.getUser(any(), any())).thenReturn(user);
+
+    // Mock metalake with in-use property
+    BaseMetalake metalake = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata = mock(PropertiesMetadata.class);
+    when(propertiesMetadata.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake.propertiesMetadata()).thenReturn(propertiesMetadata);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake);
 
     Response resp =
         target("/metalakes/metalake1/users/user1")
@@ -209,7 +240,7 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertTrue(userDTO.roles().isEmpty());
 
     // Test to throw NoSuchMetalakeException
-    doThrow(new NoSuchMetalakeException("mock error")).when(manager).getUser(any(), any());
+    doThrow(new NoSuchEntityException("mock error")).when(entityStore).get(any(), any(), any());
     Response resp1 =
         target("/metalakes/metalake1/users/user1")
             .request(MediaType.APPLICATION_JSON_TYPE)
@@ -223,6 +254,12 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals(NoSuchMetalakeException.class.getSimpleName(), errorResponse.getType());
 
     // Test to throw NoSuchUserException
+    Mockito.reset(entityStore);
+    BaseMetalake metalake1 = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata1 = mock(PropertiesMetadata.class);
+    when(propertiesMetadata1.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake1.propertiesMetadata()).thenReturn(propertiesMetadata1);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake1);
     doThrow(new NoSuchUserException("mock error")).when(manager).getUser(any(), any());
     Response resp2 =
         target("/metalakes/metalake1/users/user1")
@@ -263,9 +300,35 @@ public class TestUserOperations extends BaseOperationsTest {
   }
 
   @Test
-  public void testRemoveUser() {
-    when(manager.removeUser(any(), any())).thenReturn(true);
+  public void testRemoveUser() throws IOException {
+    // Mock metalake with in-use property
+    BaseMetalake metalake = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata = mock(PropertiesMetadata.class);
+    when(propertiesMetadata.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake.propertiesMetadata()).thenReturn(propertiesMetadata);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake);
 
+    // Delete the metalake owner
+    when(manager.removeUser(any(), any())).thenReturn(true);
+    Owner owner = mock(Owner.class);
+    when(owner.type()).thenReturn(Owner.Type.USER);
+    when(owner.name()).thenReturn("user1");
+    when(ownerDispatcher.getOwner(any(), any())).thenReturn(Optional.of(owner));
+
+    Response respOwner =
+        target("/metalakes/metalake1/users/user1")
+            .request(MediaType.APPLICATION_JSON_TYPE)
+            .accept("application/vnd.gravitino.v1+json")
+            .delete();
+    Assertions.assertEquals(Response.Status.BAD_REQUEST.getStatusCode(), respOwner.getStatus());
+
+    ErrorResponse errorResponseOwner = respOwner.readEntity(ErrorResponse.class);
+    Assertions.assertEquals(ErrorConstants.ILLEGAL_ARGUMENTS_CODE, errorResponseOwner.getCode());
+    Assertions.assertEquals(
+        IllegalArgumentException.class.getSimpleName(), errorResponseOwner.getType());
+
+    // Delete user normally
+    when(owner.name()).thenReturn("user2");
     Response resp =
         target("/metalakes/metalake1/users/user1")
             .request(MediaType.APPLICATION_JSON_TYPE)
@@ -306,8 +369,15 @@ public class TestUserOperations extends BaseOperationsTest {
   }
 
   @Test
-  public void testListUsernames() {
+  public void testListUsernames() throws IOException {
     when(manager.listUserNames(any())).thenReturn(new String[] {"user"});
+
+    // Mock metalake with in-use property
+    BaseMetalake metalake = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata = mock(PropertiesMetadata.class);
+    when(propertiesMetadata.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake.propertiesMetadata()).thenReturn(propertiesMetadata);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake);
 
     Response resp =
         target("/metalakes/metalake1/users/")
@@ -323,7 +393,7 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals("user", listResponse.getNames()[0]);
 
     // Test to throw NoSuchMetalakeException
-    doThrow(new NoSuchMetalakeException("mock error")).when(manager).listUserNames(any());
+    doThrow(new NoSuchEntityException("mock error")).when(entityStore).get(any(), any(), any());
     Response resp1 =
         target("/metalakes/metalake1/users/")
             .request(MediaType.APPLICATION_JSON_TYPE)
@@ -337,6 +407,12 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals(NoSuchMetalakeException.class.getSimpleName(), errorResponse.getType());
 
     // Test to throw internal RuntimeException
+    Mockito.reset(entityStore);
+    BaseMetalake metalake1 = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata1 = mock(PropertiesMetadata.class);
+    when(propertiesMetadata1.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake1.propertiesMetadata()).thenReturn(propertiesMetadata1);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake1);
     doThrow(new RuntimeException("mock error")).when(manager).listUserNames(any());
     Response resp3 =
         target("/metalakes/metalake1/users")
@@ -353,9 +429,16 @@ public class TestUserOperations extends BaseOperationsTest {
   }
 
   @Test
-  public void testListUsers() {
+  public void testListUsers() throws IOException {
     User user = buildUser("user");
     when(manager.listUsers(any())).thenReturn(new User[] {user});
+
+    // Mock metalake with in-use property
+    BaseMetalake metalake = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata = mock(PropertiesMetadata.class);
+    when(propertiesMetadata.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake.propertiesMetadata()).thenReturn(propertiesMetadata);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake);
 
     Response resp =
         target("/metalakes/metalake1/users/")
@@ -373,7 +456,7 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals(user.roles(), listResponse.getUsers()[0].roles());
 
     // Test to throw NoSuchMetalakeException
-    doThrow(new NoSuchMetalakeException("mock error")).when(manager).listUsers(any());
+    doThrow(new NoSuchEntityException("mock error")).when(entityStore).get(any(), any(), any());
     Response resp1 =
         target("/metalakes/metalake1/users/")
             .queryParam("details", "true")
@@ -388,6 +471,12 @@ public class TestUserOperations extends BaseOperationsTest {
     Assertions.assertEquals(NoSuchMetalakeException.class.getSimpleName(), errorResponse.getType());
 
     // Test to throw internal RuntimeException
+    Mockito.reset(entityStore);
+    BaseMetalake metalake2 = mock(BaseMetalake.class);
+    PropertiesMetadata propertiesMetadata2 = mock(PropertiesMetadata.class);
+    when(propertiesMetadata2.getOrDefault(any(), any())).thenReturn(true);
+    when(metalake2.propertiesMetadata()).thenReturn(propertiesMetadata2);
+    when(entityStore.get(any(), any(), any())).thenReturn(metalake2);
     doThrow(new RuntimeException("mock error")).when(manager).listUsers(any());
     Response resp3 =
         target("/metalakes/metalake1/users")

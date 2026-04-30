@@ -139,6 +139,7 @@ public class TestTagManager {
     Mockito.when(config.get(Configs.CACHE_WEIGHER_ENABLED)).thenReturn(true);
     Mockito.when(config.get(Configs.CACHE_STATS_ENABLED)).thenReturn(false);
     Mockito.when(config.get(Configs.CACHE_IMPLEMENTATION)).thenReturn("caffeine");
+    Mockito.when(config.get(Configs.CACHE_LOCK_SEGMENTS)).thenReturn(16);
 
     Mockito.doReturn(100000L).when(config).get(TREE_LOCK_MAX_NODE_IN_MEMORY);
     Mockito.doReturn(1000L).when(config).get(TREE_LOCK_MIN_NODE_IN_MEMORY);
@@ -353,6 +354,24 @@ public class TestTagManager {
     Assertions.assertEquals("new comment", removedPropTag.comment());
     Map<String, String> expectedProp2 = ImmutableMap.of("k2", "v2");
     Assertions.assertEquals(expectedProp2, removedPropTag.properties());
+  }
+
+  @Test
+  public void testAlterTagRenameToExistingTag() {
+    tagManager.createTag(METALAKE, "tag1", null, null);
+    tagManager.createTag(METALAKE, "tag2", null, null);
+
+    TagAlreadyExistsException exception =
+        Assertions.assertThrows(
+            TagAlreadyExistsException.class,
+            () -> tagManager.alterTag(METALAKE, "tag1", TagChange.rename("tag2")));
+
+    Assertions.assertEquals(
+        "Tag with name tag2 under metalake metalake_for_tag_test already exists",
+        exception.getMessage());
+
+    Assertions.assertEquals("tag1", tagManager.getTag(METALAKE, "tag1").name());
+    Assertions.assertEquals("tag2", tagManager.getTag(METALAKE, "tag2").name());
   }
 
   @Test

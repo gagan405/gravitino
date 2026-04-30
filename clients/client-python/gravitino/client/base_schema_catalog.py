@@ -16,17 +16,27 @@
 # under the License.
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from gravitino.api.catalog import Catalog
+from gravitino.api.function.function import Function
+from gravitino.api.function.function_catalog import FunctionCatalog
+from gravitino.api.function.function_change import FunctionChange
+from gravitino.api.function.function_definition import FunctionDefinition
+from gravitino.api.function.function_type import FunctionType
 from gravitino.api.metadata_object import MetadataObject
+from gravitino.api.metadata_objects import MetadataObjects
 from gravitino.api.schema import Schema
 from gravitino.api.schema_change import SchemaChange
 from gravitino.api.supports_schemas import SupportsSchemas
+from gravitino.api.tag.supports_tags import SupportsTags
+from gravitino.api.tag.tag import Tag
+from gravitino.client.function_catalog_operations import FunctionCatalogOperations
+from gravitino.client.generic_schema import GenericSchema
 from gravitino.client.metadata_object_credential_operations import (
     MetadataObjectCredentialOperations,
 )
-from gravitino.client.metadata_object_impl import MetadataObjectImpl
+from gravitino.client.metadata_object_tag_operations import MetadataObjectTagOperations
 from gravitino.dto.audit_dto import AuditDTO
 from gravitino.dto.catalog_dto import CatalogDTO
 from gravitino.dto.requests.schema_create_request import SchemaCreateRequest
@@ -35,16 +45,22 @@ from gravitino.dto.requests.schema_updates_request import SchemaUpdatesRequest
 from gravitino.dto.responses.drop_response import DropResponse
 from gravitino.dto.responses.entity_list_response import EntityListResponse
 from gravitino.dto.responses.schema_response import SchemaResponse
-from gravitino.exceptions.handlers.schema_error_handler import SCHEMA_ERROR_HANDLER
-from gravitino.namespace import Namespace
-from gravitino.utils import HTTPClient
-from gravitino.rest.rest_utils import encode_string
 from gravitino.exceptions.base import IllegalArgumentException
+from gravitino.exceptions.handlers.schema_error_handler import SCHEMA_ERROR_HANDLER
+from gravitino.name_identifier import NameIdentifier
+from gravitino.namespace import Namespace
+from gravitino.rest.rest_utils import encode_string
+from gravitino.utils import HTTPClient
 
 logger = logging.getLogger(__name__)
 
 
-class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
+class BaseSchemaCatalog(
+    CatalogDTO,
+    SupportsSchemas,
+    FunctionCatalog,
+    SupportsTags,
+):
     """
     BaseSchemaCatalog is the base abstract class for all the catalog with schema. It provides the
     common methods for managing schemas in a catalog. With BaseSchemaCatalog, users can list,
@@ -59,6 +75,8 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
 
     # The metadata object credential operations
     _object_credential_operations: MetadataObjectCredentialOperations
+
+    _function_operations: FunctionCatalogOperations
 
     def __init__(
         self,
@@ -82,14 +100,23 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
         self.rest_client = rest_client
         self._catalog_namespace = catalog_namespace
 
-        metadata_object = MetadataObjectImpl([name], MetadataObject.Type.CATALOG)
+        metadata_object = MetadataObjects.of([name], MetadataObject.Type.CATALOG)
         self._object_credential_operations = MetadataObjectCredentialOperations(
+            catalog_namespace.level(0), metadata_object, rest_client
+        )
+        self._function_operations = FunctionCatalogOperations(
+            rest_client, catalog_namespace, self.name()
+        )
+        self._object_tag_operations = MetadataObjectTagOperations(
             catalog_namespace.level(0), metadata_object, rest_client
         )
 
         self.validate()
 
     def as_schemas(self):
+        return self
+
+    def as_function_catalog(self):
         return self
 
     def list_schemas(self) -> List[str]:
@@ -143,7 +170,12 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
         schema_response = SchemaResponse.from_json(resp.body, infer_missing=True)
         schema_response.validate()
 
-        return schema_response.schema()
+        return GenericSchema(
+            schema_response.schema(),
+            self.rest_client,
+            self._catalog_namespace.level(0),
+            self._name,
+        )
 
     def load_schema(self, schema_name: str) -> Schema:
         """Load the schema with specified identifier.
@@ -166,7 +198,12 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
         schema_response = SchemaResponse.from_json(resp.body, infer_missing=True)
         schema_response.validate()
 
-        return schema_response.schema()
+        return GenericSchema(
+            schema_response.schema(),
+            self.rest_client,
+            self._catalog_namespace.level(0),
+            self._name,
+        )
 
     def alter_schema(self, schema_name: str, *changes: SchemaChange) -> Schema:
         """Alter the schema with specified identifier by applying the changes.
@@ -195,7 +232,13 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
         )
         schema_response = SchemaResponse.from_json(resp.body, infer_missing=True)
         schema_response.validate()
-        return schema_response.schema()
+
+        return GenericSchema(
+            schema_response.schema(),
+            self.rest_client,
+            self._catalog_namespace.level(0),
+            self._name,
+        )
 
     def drop_schema(self, schema_name: str, cascade: bool) -> bool:
         """Drop the schema with specified identifier.
@@ -221,6 +264,39 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
         drop_resp = DropResponse.from_json(resp.body, infer_missing=True)
         drop_resp.validate()
         return drop_resp.dropped()
+
+    def list_functions(self, namespace: Namespace) -> List[NameIdentifier]:
+        return self._function_operations.list_functions(namespace)
+
+    def list_function_infos(self, namespace: Namespace) -> List[Function]:
+        return self._function_operations.list_function_infos(namespace)
+
+    def get_function(self, ident: NameIdentifier) -> Function:
+        return self._function_operations.get_function(ident)
+
+    def register_function(
+        self,
+        ident: NameIdentifier,
+        comment: Optional[str],
+        function_type: FunctionType,
+        deterministic: bool,
+        definitions: List[FunctionDefinition],
+    ) -> Function:
+        return self._function_operations.register_function(
+            ident,
+            comment,
+            function_type,
+            deterministic,
+            definitions,
+        )
+
+    def alter_function(
+        self, ident: NameIdentifier, *changes: FunctionChange
+    ) -> Function:
+        return self._function_operations.alter_function(ident, *changes)
+
+    def drop_function(self, ident: NameIdentifier) -> bool:
+        return self._function_operations.drop_function(ident)
 
     def _schema_namespace(self) -> Namespace:
         return Namespace.of(self._catalog_namespace.level(0), self.name())
@@ -262,3 +338,17 @@ class BaseSchemaCatalog(CatalogDTO, SupportsSchemas):
             raise IllegalArgumentException("provider must not be blank")
         if self.audit_info() is None:
             raise IllegalArgumentException("audit must not be None")
+
+    def list_tags(self) -> List[str]:
+        return self._object_tag_operations.list_tags()
+
+    def list_tags_info(self) -> List[Tag]:
+        return self._object_tag_operations.list_tags_info()
+
+    def get_tag(self, name: str) -> Tag:
+        return self._object_tag_operations.get_tag(name)
+
+    def associate_tags(
+        self, tags_to_add: List[str], tags_to_remove: List[str]
+    ) -> List[str]:
+        return self._object_tag_operations.associate_tags(tags_to_add, tags_to_remove)

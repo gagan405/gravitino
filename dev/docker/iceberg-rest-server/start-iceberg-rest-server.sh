@@ -24,6 +24,12 @@ iceberg_rest_server_dir="$(cd "${bin_dir}/../">/dev/null; pwd)"
 
 cd ${iceberg_rest_server_dir}
 
-python bin/rewrite_config.py
+# Skip config rewrite if SKIP_CONFIG_REWRITE is set (e.g., in Kubernetes)
+if [ "${SKIP_CONFIG_REWRITE}" != "true" ]; then
+  python bin/rewrite_config.py
+fi
 
-./bin/gravitino-iceberg-rest-server.sh start
+JAVA_OPTS+=" -XX:-UseContainerSupport"
+export JAVA_OPTS
+
+exec ./bin/gravitino-iceberg-rest-server.sh run

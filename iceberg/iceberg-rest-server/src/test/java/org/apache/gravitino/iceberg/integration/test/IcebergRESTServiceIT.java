@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
-import org.apache.iceberg.exceptions.BadRequestException;
+import org.apache.iceberg.exceptions.NamespaceNotEmptyException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
@@ -117,6 +117,10 @@ public abstract class IcebergRESTServiceIT extends IcebergRESTServiceBaseIT {
     sql(String.format("DROP TABLE %s.%s PURGE", namespace, table));
   }
 
+  private void purgeView(String namespace, String view) {
+    sql(String.format("DROP VIEW %s.%s", namespace, view));
+  }
+
   private void purgeNamespace(String namespace) {
     if (!namespaceExists(namespace)) {
       return;
@@ -127,6 +131,15 @@ public abstract class IcebergRESTServiceIT extends IcebergRESTServiceBaseIT {
       List<Object[]> childNamespaces = sql(String.format("SHOW DATABASES IN %s ", namespace));
       Set<String> childNamespacesString = convertToStringSet(childNamespaces, 0);
       childNamespacesString.forEach(this::purgeNamespace);
+    }
+
+    // Drop views first (required by Iceberg 1.10.1+)
+    try {
+      List<Object[]> views = sql("SHOW VIEWS IN " + namespace);
+      Set<String> viewsString = convertToStringSet(views, 1);
+      viewsString.forEach(view -> purgeView(namespace, view));
+    } catch (Exception e) {
+      // Ignore if SHOW VIEWS is not supported
     }
 
     Set<String> tables = convertToStringSet(sql("SHOW TABLES IN " + namespace), 1);
@@ -207,9 +220,8 @@ public abstract class IcebergRESTServiceIT extends IcebergRESTServiceBaseIT {
                 + "(id bigint COMMENT 'unique id',data string) using iceberg",
             namespaceName));
 
-    // seems a bug in Iceberg REST client, should be NamespaceNotEmptyException
     Assertions.assertThrowsExactly(
-        BadRequestException.class, () -> sql("DROP DATABASE " + namespaceName));
+        NamespaceNotEmptyException.class, () -> sql("DROP DATABASE " + namespaceName));
     sql(String.format("DROP TABLE %s.test", namespaceName));
     sql("DROP DATABASE " + namespaceName);
 

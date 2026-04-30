@@ -22,19 +22,24 @@ package org.apache.gravitino.job;
 import static org.apache.gravitino.metalake.MetalakeManager.checkMetalake;
 
 import com.google.common.annotations.VisibleForTesting;
-import java.io.Closeable;
+import com.google.common.base.Preconditions;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.Configs;
@@ -43,7 +48,6 @@ import org.apache.gravitino.EntityAlreadyExistsException;
 import org.apache.gravitino.EntityStore;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
-import org.apache.gravitino.SupportsRelationOperations;
 import org.apache.gravitino.connector.job.JobExecutor;
 import org.apache.gravitino.exceptions.InUseException;
 import org.apache.gravitino.exceptions.JobTemplateAlreadyExistsException;
@@ -55,14 +59,32 @@ import org.apache.gravitino.lock.TreeLockUtils;
 import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.JobEntity;
 import org.apache.gravitino.meta.JobTemplateEntity;
+import org.apache.gravitino.metalake.MetalakeManager;
 import org.apache.gravitino.storage.IdGenerator;
 import org.apache.gravitino.utils.NameIdentifierUtil;
 import org.apache.gravitino.utils.NamespaceUtil;
 import org.apache.gravitino.utils.PrincipalUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-public class JobManager implements JobOperationDispatcher, Closeable {
+public class JobManager implements JobOperationDispatcher {
+
+  private static final Logger LOG = LoggerFactory.getLogger(JobManager.class);
 
   private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{([\\w.-]+)\\}\\}");
+
+  private static final String JOB_STAGING_DIR =
+      File.separator
+          + "%s"
+          + File.separator
+          + "%s"
+          + File.separator
+          + JobHandle.JOB_ID_PREFIX
+          + "%s";
+
+  private static final long JOB_STAGING_DIR_CLEANUP_MIN_TIME_IN_MS = 600 * 1000L; // 10 minute
+
+  private static final long JOB_STATUS_PULL_MIN_INTERVAL_IN_MS = 60 * 1000L; // 1 minute
 
   private static final int TIMEOUT_IN_MS = 30 * 1000; // 30 seconds
 
@@ -73,6 +95,12 @@ public class JobManager implements JobOperationDispatcher, Closeable {
   private final JobExecutor jobExecutor;
 
   private final IdGenerator idGenerator;
+
+  private final long jobStagingDirKeepTimeInMs;
+
+  @VisibleForTesting final ScheduledExecutorService cleanUpExecutor;
+
+  @VisibleForTesting final ScheduledExecutorService statusPullExecutor;
 
   public JobManager(Config config, EntityStore entityStore, IdGenerator idGenerator) {
     this(config, entityStore, idGenerator, JobExecutorFactory.create(config));
@@ -103,6 +131,56 @@ public class JobManager implements JobOperationDispatcher, Closeable {
             String.format("Failed to create staging directory %s", stagingDirPath));
       }
     }
+
+    this.jobStagingDirKeepTimeInMs = config.get(Configs.JOB_STAGING_DIR_KEEP_TIME_IN_MS);
+    if (jobStagingDirKeepTimeInMs < JOB_STAGING_DIR_CLEANUP_MIN_TIME_IN_MS) {
+      LOG.warn(
+          "The job staging directory keep time is set to {} ms, the number is too small, "
+              + "which will cause frequent cleanup, please set it to a value larger than {} if "
+              + "you're not using it to do the test.",
+          jobStagingDirKeepTimeInMs,
+          JOB_STAGING_DIR_CLEANUP_MIN_TIME_IN_MS);
+    }
+
+    this.cleanUpExecutor =
+        Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "job-staging-dir-cleanup");
+              thread.setDaemon(true);
+              return thread;
+            });
+    long scheduleInterval = jobStagingDirKeepTimeInMs / 10;
+    Preconditions.checkArgument(
+        scheduleInterval != 0,
+        "The schedule interval for "
+            + "job staging directory cleanup cannot be zero, please set the job staging directory "
+            + "keep time to a value larger than %s ms",
+        JOB_STAGING_DIR_CLEANUP_MIN_TIME_IN_MS);
+
+    cleanUpExecutor.scheduleAtFixedRate(
+        this::cleanUpStagingDirs, scheduleInterval, scheduleInterval, TimeUnit.MILLISECONDS);
+
+    long jobStatusPullIntervalInMs = config.get(Configs.JOB_STATUS_PULL_INTERVAL_IN_MS);
+    if (jobStatusPullIntervalInMs < JOB_STATUS_PULL_MIN_INTERVAL_IN_MS) {
+      LOG.warn(
+          "The job status pull interval is set to {} ms, the number is too small, "
+              + "which will cause frequent job status pull from external job executor, please set "
+              + "it to a value larger than {} if you're not using it to do the test.",
+          jobStatusPullIntervalInMs,
+          JOB_STATUS_PULL_MIN_INTERVAL_IN_MS);
+    }
+    this.statusPullExecutor =
+        Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "job-status-pull");
+              thread.setDaemon(true);
+              return thread;
+            });
+    statusPullExecutor.scheduleAtFixedRate(
+        this::pullAndUpdateJobStatus,
+        jobStatusPullIntervalInMs,
+        jobStatusPullIntervalInMs,
+        TimeUnit.MILLISECONDS);
   }
 
   @Override
@@ -174,7 +252,14 @@ public class JobManager implements JobOperationDispatcher, Closeable {
   public boolean deleteJobTemplate(String metalake, String jobTemplateName) throws InUseException {
     checkMetalake(NameIdentifierUtil.ofMetalake(metalake), entityStore);
 
-    List<JobEntity> jobs = listJobs(metalake, Optional.of(jobTemplateName));
+    List<JobEntity> jobs;
+    try {
+      jobs = listJobs(metalake, Optional.of(jobTemplateName));
+    } catch (NoSuchJobTemplateException e) {
+      // If the job template does not exist, we can safely return false.
+      return false;
+    }
+
     boolean hasActiveJobs =
         jobs.stream()
             .anyMatch(
@@ -188,6 +273,18 @@ public class JobManager implements JobOperationDispatcher, Closeable {
           jobTemplateName, metalake);
     }
 
+    // Delete all the job staging directories associated with the job template.
+    String jobTemplateStagingPath =
+        stagingDir.getAbsolutePath() + File.separator + metalake + File.separator + jobTemplateName;
+    File jobTemplateStagingDir = new File(jobTemplateStagingPath);
+    if (jobTemplateStagingDir.exists()) {
+      try {
+        FileUtils.deleteDirectory(jobTemplateStagingDir);
+      } catch (IOException e) {
+        LOG.error("Failed to delete job template staging directory: {}", jobTemplateStagingPath, e);
+      }
+    }
+
     // Delete the job template entity as well as all the jobs associated with it.
     return TreeLockUtils.doWithTreeLock(
         NameIdentifier.of(NamespaceUtil.ofJobTemplate(metalake).levels()),
@@ -199,6 +296,53 @@ public class JobManager implements JobOperationDispatcher, Closeable {
                 Entity.EntityType.JOB_TEMPLATE);
           } catch (IOException ioe) {
             throw new RuntimeException(ioe);
+          }
+        });
+  }
+
+  @Override
+  public JobTemplateEntity alterJobTemplate(
+      String metalake, String jobTemplateName, JobTemplateChange... changes)
+      throws NoSuchJobTemplateException, IllegalArgumentException {
+    checkMetalake(NameIdentifierUtil.ofMetalake(metalake), entityStore);
+
+    Optional<String> newName =
+        Arrays.stream(changes)
+            .filter(c -> c instanceof JobTemplateChange.RenameJobTemplate)
+            .map(c -> ((JobTemplateChange.RenameJobTemplate) c).getNewName())
+            .reduce((first, second) -> second);
+
+    NameIdentifier jobTemplateIdent = NameIdentifierUtil.ofJobTemplate(metalake, jobTemplateName);
+    return TreeLockUtils.doWithTreeLock(
+        jobTemplateIdent,
+        LockType.READ, // Use READ lock because the update method in JobTemplateMetaService will
+        // handle the update transactionally and update with a new version number. So we don't
+        // have to use a WRITE lock here.
+        () -> {
+          try {
+            return entityStore.update(
+                jobTemplateIdent,
+                JobTemplateEntity.class,
+                Entity.EntityType.JOB_TEMPLATE,
+                jobTemplateEntity ->
+                    updateJobTemplateEntity(jobTemplateIdent, jobTemplateEntity, changes));
+          } catch (NoSuchEntityException e) {
+            throw new NoSuchJobTemplateException(
+                "Job template with name %s under metalake %s does not exist, this could be due to"
+                    + " the job template not existing or updated concurrently. For the latter case"
+                    + " please retry the operation.",
+                jobTemplateName, metalake);
+          } catch (IOException ioe) {
+            throw new RuntimeException(ioe);
+          } catch (EntityAlreadyExistsException e) {
+            // If the EntityAlreadyExistsException is thrown, it means the new name already exists.
+            // So there should be a rename change, and the new name should be present.
+            throw new RuntimeException(
+                String.format(
+                    "Failed to rename job template from %s to %s under metalake %s, the new name "
+                        + "already exists",
+                    jobTemplateName, newName, metalake),
+                e);
           }
         });
   }
@@ -223,6 +367,13 @@ public class JobManager implements JobOperationDispatcher, Closeable {
               NameIdentifier jobTemplateIdent =
                   NameIdentifierUtil.ofJobTemplate(metalake, jobTemplateName.get());
 
+              // If jobTemplateName is present, we need to list the jobs associated with the job.
+              // Using a mock namespace from job template identifier to get the jobs associated
+              // with job template.
+              String[] elements =
+                  ArrayUtils.add(jobTemplateIdent.namespace().levels(), jobTemplateIdent.name());
+              Namespace jobTemplateIdentNs = Namespace.of(elements);
+
               // Lock the job template to ensure no concurrent modifications/deletions
               jobEntities =
                   TreeLockUtils.doWithTreeLock(
@@ -230,12 +381,8 @@ public class JobManager implements JobOperationDispatcher, Closeable {
                       LockType.READ,
                       () ->
                           // List all the jobs associated with the job template
-                          entityStore
-                              .relationOperations()
-                              .listEntitiesByRelation(
-                                  SupportsRelationOperations.Type.JOB_TEMPLATE_JOB_REL,
-                                  jobTemplateIdent,
-                                  Entity.EntityType.JOB_TEMPLATE));
+                          entityStore.list(
+                              jobTemplateIdentNs, JobEntity.class, Entity.EntityType.JOB));
             } else {
               jobEntities = entityStore.list(jobNs, JobEntity.class, Entity.EntityType.JOB);
             }
@@ -276,15 +423,10 @@ public class JobManager implements JobOperationDispatcher, Closeable {
     JobTemplateEntity jobTemplateEntity = getJobTemplate(metalake, jobTemplateName);
 
     // Create staging directory.
-    // TODO(jerry). The job staging directory will be deleted using a background thread.
     long jobId = idGenerator.nextId();
     String jobStagingPath =
         stagingDir.getAbsolutePath()
-            + File.separator
-            + metalake
-            + File.separator
-            + JobHandle.JOB_ID_PREFIX
-            + jobId;
+            + String.format(JOB_STAGING_DIR, metalake, jobTemplateName, jobId);
     File jobStagingDir = new File(jobStagingPath);
     if (!jobStagingDir.mkdirs()) {
       throw new RuntimeException(
@@ -335,10 +477,12 @@ public class JobManager implements JobOperationDispatcher, Closeable {
     // Retrieve the job entity, will throw NoSuchJobException if the job does not exist.
     JobEntity jobEntity = getJob(metalake, jobId);
 
-    if (jobEntity.status() == JobHandle.Status.CANCELLED
+    if (jobEntity.status() == JobHandle.Status.CANCELLING
+        || jobEntity.status() == JobHandle.Status.CANCELLED
         || jobEntity.status() == JobHandle.Status.SUCCEEDED
         || jobEntity.status() == JobHandle.Status.FAILED) {
-      // If the job is already cancelled, succeeded, or failed, we do not need to cancel it again.
+      // If the job is already cancelling, cancelled, succeeded, or failed, we do not need to cancel
+      // it again.
       return jobEntity;
     }
 
@@ -366,31 +510,172 @@ public class JobManager implements JobOperationDispatcher, Closeable {
                     .withLastModifiedTime(Instant.now())
                     .build())
             .build();
-
-    try {
-      // Update the job entity in the entity store
-      entityStore.put(newJobEntity, true /* overwrite */);
-      return newJobEntity;
-    } catch (IOException e) {
-      throw new RuntimeException(
-          String.format("Failed to update job entity %s to CANCELING status", newJobEntity), e);
-    }
+    return TreeLockUtils.doWithTreeLock(
+        NameIdentifierUtil.ofJob(metalake, jobId),
+        LockType.WRITE,
+        () -> {
+          try {
+            // Update the job entity in the entity store
+            entityStore.put(newJobEntity, true /* overwrite */);
+            return newJobEntity;
+          } catch (IOException e) {
+            throw new RuntimeException(
+                String.format("Failed to update job entity %s to CANCELING status", newJobEntity),
+                e);
+          }
+        });
   }
 
   @Override
   public void close() throws IOException {
-    jobExecutor.close();
-    // TODO(jerry). Implement any necessary cleanup logic for the JobManager.
+    try {
+      jobExecutor.close();
+    } finally {
+      statusPullExecutor.shutdownNow();
+      cleanUpExecutor.shutdownNow();
+    }
   }
 
   @VisibleForTesting
-  static JobTemplate createRuntimeJobTemplate(
+  void pullAndUpdateJobStatus() {
+    List<String> metalakes = MetalakeManager.listInUseMetalakes(entityStore);
+    for (String metalake : metalakes) {
+      // This unnecessary list all the jobs, we need to improve the code to only list the active
+      // jobs.
+      List<JobEntity> activeJobs =
+          listJobs(metalake, Optional.empty()).stream()
+              .filter(
+                  job ->
+                      job.status() == JobHandle.Status.QUEUED
+                          || job.status() == JobHandle.Status.STARTED
+                          || job.status() == JobHandle.Status.CANCELLING)
+              .toList();
+
+      activeJobs.forEach(
+          job -> {
+            JobHandle.Status newStatus = job.status();
+            try {
+              newStatus = jobExecutor.getJobStatus(job.jobExecutionId());
+            } catch (NoSuchJobException e) {
+              // If the job is not found in the external job executor, we assume the job is
+              // FAILED if it is not in CANCELLING status, otherwise we assume it is CANCELLED.
+              if (job.status() == JobHandle.Status.CANCELLING) {
+                newStatus = JobHandle.Status.CANCELLED;
+              } else {
+                newStatus = JobHandle.Status.FAILED;
+              }
+              LOG.warn(
+                  "Job {} with execution id {} under metalake {} is not found in the "
+                      + "external job executor, marking it as {}. This could be due to the job "
+                      + "being deleted by the external job executor. Please check the external job "
+                      + "executor to know more details.",
+                  job.name(),
+                  job.jobExecutionId(),
+                  metalake,
+                  newStatus);
+            } catch (Exception e) {
+              LOG.error(
+                  "Failed to get job status for job {} by execution id {}",
+                  job.name(),
+                  job.jobExecutionId(),
+                  e);
+            }
+
+            if (newStatus != job.status()) {
+              JobEntity newJobEntity =
+                  JobEntity.builder()
+                      .withId(job.id())
+                      .withJobExecutionId(job.jobExecutionId())
+                      .withJobTemplateName(job.jobTemplateName())
+                      .withStatus(newStatus)
+                      .withNamespace(job.namespace())
+                      .withAuditInfo(
+                          AuditInfo.builder()
+                              .withCreator(job.auditInfo().creator())
+                              .withCreateTime(job.auditInfo().createTime())
+                              .withLastModifier(PrincipalUtils.getCurrentPrincipal().getName())
+                              .withLastModifiedTime(Instant.now())
+                              .build())
+                      .build();
+
+              // Update the job entity with new status.
+              JobHandle.Status finalNewStatus = newStatus;
+              TreeLockUtils.doWithTreeLock(
+                  NameIdentifierUtil.ofJob(metalake, job.name()),
+                  LockType.WRITE,
+                  () -> {
+                    try {
+                      entityStore.put(newJobEntity, true /* overwrite */);
+                      return null;
+                    } catch (IOException e) {
+                      throw new RuntimeException(
+                          String.format(
+                              "Failed to update job entity %s to status %s",
+                              newJobEntity, finalNewStatus),
+                          e);
+                    }
+                  });
+
+              LOG.info(
+                  "Updated the job {} with execution id {} status to {}",
+                  job.name(),
+                  job.jobExecutionId(),
+                  newStatus);
+            }
+          });
+    }
+  }
+
+  @VisibleForTesting
+  void cleanUpStagingDirs() {
+    List<String> metalakes = MetalakeManager.listInUseMetalakes(entityStore);
+
+    for (String metalake : metalakes) {
+      List<JobEntity> finishedJobs =
+          listJobs(metalake, Optional.empty()).stream()
+              .filter(
+                  job ->
+                      job.status() == JobHandle.Status.CANCELLED
+                          || job.status() == JobHandle.Status.SUCCEEDED
+                          || job.status() == JobHandle.Status.FAILED)
+              .filter(
+                  job ->
+                      job.finishedAt() > 0
+                          && job.finishedAt() + jobStagingDirKeepTimeInMs
+                              < System.currentTimeMillis())
+              .toList();
+
+      finishedJobs.forEach(
+          job -> {
+            try {
+              entityStore.delete(
+                  NameIdentifierUtil.ofJob(metalake, job.name()), Entity.EntityType.JOB);
+
+              String jobStagingPath =
+                  stagingDir.getAbsolutePath()
+                      + String.format(JOB_STAGING_DIR, metalake, job.jobTemplateName(), job.id());
+              File jobStagingDir = new File(jobStagingPath);
+              if (jobStagingDir.exists()) {
+                FileUtils.deleteDirectory(jobStagingDir);
+                LOG.info("Deleted job staging directory {} for job {}", jobStagingPath, job.name());
+              }
+            } catch (IOException e) {
+              LOG.error("Failed to delete job and staging directory for job {}", job.name(), e);
+            }
+          });
+    }
+  }
+
+  @VisibleForTesting
+  public static JobTemplate createRuntimeJobTemplate(
       JobTemplateEntity jobTemplateEntity, Map<String, String> jobConf, File stagingDir) {
     String name = jobTemplateEntity.name();
     String comment = jobTemplateEntity.comment();
 
     JobTemplateEntity.TemplateContent content = jobTemplateEntity.templateContent();
-    String executable = fetchFileFromUri(content.executable(), stagingDir, TIMEOUT_IN_MS);
+    String executable =
+        fetchFileFromUri(
+            replacePlaceholder(content.executable(), jobConf), stagingDir, TIMEOUT_IN_MS);
 
     List<String> args =
         content.arguments().stream()
@@ -411,7 +696,13 @@ public class JobManager implements JobOperationDispatcher, Closeable {
 
     // For shell job template
     if (content.jobType() == JobTemplate.JobType.SHELL) {
-      List<String> scripts = fetchFilesFromUri(content.scripts(), stagingDir, TIMEOUT_IN_MS);
+      List<String> scripts =
+          content.scripts().stream()
+              .map(
+                  script ->
+                      fetchFileFromUri(
+                          replacePlaceholder(script, jobConf), stagingDir, TIMEOUT_IN_MS))
+              .collect(Collectors.toList());
 
       return ShellJobTemplate.builder()
           .withName(name)
@@ -426,10 +717,30 @@ public class JobManager implements JobOperationDispatcher, Closeable {
 
     // For Spark job template
     if (content.jobType() == JobTemplate.JobType.SPARK) {
-      String className = content.className();
-      List<String> jars = fetchFilesFromUri(content.jars(), stagingDir, TIMEOUT_IN_MS);
-      List<String> files = fetchFilesFromUri(content.files(), stagingDir, TIMEOUT_IN_MS);
-      List<String> archives = fetchFilesFromUri(content.archives(), stagingDir, TIMEOUT_IN_MS);
+      String className = replacePlaceholder(content.className(), jobConf);
+      List<String> jars =
+          content.jars().stream()
+              .map(
+                  jar ->
+                      fetchFileFromUri(replacePlaceholder(jar, jobConf), stagingDir, TIMEOUT_IN_MS))
+              .collect(Collectors.toList());
+
+      List<String> files =
+          content.files().stream()
+              .map(
+                  file ->
+                      fetchFileFromUri(
+                          replacePlaceholder(file, jobConf), stagingDir, TIMEOUT_IN_MS))
+              .collect(Collectors.toList());
+
+      List<String> archives =
+          content.archives().stream()
+              .map(
+                  archive ->
+                      fetchFileFromUri(
+                          replacePlaceholder(archive, jobConf), stagingDir, TIMEOUT_IN_MS))
+              .collect(Collectors.toList());
+
       Map<String, String> configs =
           content.configs().entrySet().stream()
               .collect(
@@ -461,7 +772,7 @@ public class JobManager implements JobOperationDispatcher, Closeable {
       return inputString; // Return as is if the input string is blank
     }
 
-    StringBuffer result = new StringBuffer();
+    StringBuilder result = new StringBuilder();
 
     Matcher matcher = PLACEHOLDER_PATTERN.matcher(inputString);
     while (matcher.find()) {
@@ -501,7 +812,12 @@ public class JobManager implements JobOperationDispatcher, Closeable {
           break;
 
         case "file":
-          Files.createSymbolicLink(destFile.toPath(), new File(fileUri.getPath()).toPath());
+          java.nio.file.Path sourcePath = new File(fileUri.getPath()).toPath();
+          if (!Files.exists(sourcePath)) {
+            throw new IOException(
+                String.format("Source file does not exist: %s", sourcePath.toAbsolutePath()));
+          }
+          Files.createSymbolicLink(destFile.toPath(), sourcePath);
           break;
 
         default:
@@ -512,5 +828,126 @@ public class JobManager implements JobOperationDispatcher, Closeable {
     } catch (Exception e) {
       throw new RuntimeException(String.format("Failed to fetch file from URI %s", uri), e);
     }
+  }
+
+  @VisibleForTesting
+  JobTemplateEntity updateJobTemplateEntity(
+      NameIdentifier jobTemplateIdent,
+      JobTemplateEntity jobTemplateEntity,
+      JobTemplateChange... changes) {
+    String newName = jobTemplateEntity.name();
+    String newComment = jobTemplateEntity.comment();
+    JobTemplateEntity.Builder newTemplateBuilder = JobTemplateEntity.builder();
+    JobTemplateEntity.TemplateContent.TemplateContentBuilder newTemplateContentBuilder =
+        JobTemplateEntity.TemplateContent.builder()
+            .withJobType(jobTemplateEntity.templateContent().jobType())
+            .withExecutable(jobTemplateEntity.templateContent().executable())
+            .withArguments(jobTemplateEntity.templateContent().arguments())
+            .withEnvironments(jobTemplateEntity.templateContent().environments())
+            .withCustomFields(jobTemplateEntity.templateContent().customFields())
+            .withScripts(jobTemplateEntity.templateContent().scripts())
+            .withClassName(jobTemplateEntity.templateContent().className())
+            .withJars(jobTemplateEntity.templateContent().jars())
+            .withFiles(jobTemplateEntity.templateContent().files())
+            .withArchives(jobTemplateEntity.templateContent().archives())
+            .withConfigs(jobTemplateEntity.templateContent().configs());
+
+    for (JobTemplateChange change : changes) {
+      if (change instanceof JobTemplateChange.RenameJobTemplate) {
+        newName = ((JobTemplateChange.RenameJobTemplate) change).getNewName();
+
+      } else if (change instanceof JobTemplateChange.UpdateJobTemplateComment) {
+        newComment = ((JobTemplateChange.UpdateJobTemplateComment) change).getNewComment();
+
+      } else if (change instanceof JobTemplateChange.UpdateJobTemplate) {
+        JobTemplateEntity.TemplateContent oldTemplateContent = jobTemplateEntity.templateContent();
+        JobTemplateChange.TemplateUpdate templateUpdate =
+            ((JobTemplateChange.UpdateJobTemplate) change).getTemplateUpdate();
+        newTemplateContentBuilder
+            .withJobType(oldTemplateContent.jobType())
+            .withExecutable(
+                updatedValue(
+                    oldTemplateContent.executable(),
+                    Optional.ofNullable(templateUpdate.getNewExecutable())))
+            .withArguments(
+                updatedValue(
+                    oldTemplateContent.arguments(),
+                    Optional.ofNullable(templateUpdate.getNewArguments())))
+            .withEnvironments(
+                updatedValue(
+                    oldTemplateContent.environments(),
+                    Optional.ofNullable(templateUpdate.getNewEnvironments())))
+            .withCustomFields(
+                updatedValue(
+                    oldTemplateContent.customFields(),
+                    Optional.ofNullable(templateUpdate.getNewCustomFields())));
+
+        if (templateUpdate instanceof JobTemplateChange.ShellTemplateUpdate) {
+          Preconditions.checkArgument(
+              jobTemplateEntity.templateContent().jobType() == JobTemplate.JobType.SHELL,
+              "Job template %s is not a shell job template, cannot update to shell template",
+              jobTemplateIdent.name());
+
+          JobTemplateChange.ShellTemplateUpdate shellUpdate =
+              (JobTemplateChange.ShellTemplateUpdate) templateUpdate;
+          newTemplateContentBuilder.withScripts(
+              updatedValue(
+                  oldTemplateContent.scripts(), Optional.ofNullable(shellUpdate.getNewScripts())));
+
+        } else if (templateUpdate instanceof JobTemplateChange.SparkTemplateUpdate) {
+          Preconditions.checkArgument(
+              jobTemplateEntity.templateContent().jobType() == JobTemplate.JobType.SPARK,
+              "Job template %s is not a spark job template, cannot update to spark template",
+              jobTemplateIdent.name());
+
+          JobTemplateChange.SparkTemplateUpdate sparkUpdate =
+              (JobTemplateChange.SparkTemplateUpdate) templateUpdate;
+          newTemplateContentBuilder
+              .withClassName(
+                  updatedValue(
+                      oldTemplateContent.className(),
+                      Optional.ofNullable(sparkUpdate.getNewClassName())))
+              .withJars(
+                  updatedValue(
+                      oldTemplateContent.jars(), Optional.ofNullable(sparkUpdate.getNewJars())))
+              .withFiles(
+                  updatedValue(
+                      oldTemplateContent.files(), Optional.ofNullable(sparkUpdate.getNewFiles())))
+              .withArchives(
+                  updatedValue(
+                      oldTemplateContent.archives(),
+                      Optional.ofNullable(sparkUpdate.getNewArchives())))
+              .withConfigs(
+                  updatedValue(
+                      oldTemplateContent.configs(),
+                      Optional.ofNullable(sparkUpdate.getNewConfigs())));
+
+        } else {
+          throw new IllegalArgumentException("Unsupported template update: " + templateUpdate);
+        }
+
+      } else {
+        throw new IllegalArgumentException("Unsupported job template change: " + change);
+      }
+    }
+
+    return newTemplateBuilder
+        .withId(jobTemplateEntity.id())
+        .withName(newName)
+        .withComment(newComment)
+        .withNamespace(jobTemplateIdent.namespace())
+        .withTemplateContent(newTemplateContentBuilder.build())
+        .withAuditInfo(
+            AuditInfo.builder()
+                .withCreator(jobTemplateEntity.auditInfo().creator())
+                .withCreateTime(jobTemplateEntity.auditInfo().createTime())
+                .withLastModifier(PrincipalUtils.getCurrentPrincipal().getName())
+                .withLastModifiedTime(Instant.now())
+                .build())
+        .build();
+  }
+
+  private <T> T updatedValue(T currentValue, Optional<T> newValue) {
+    return newValue.orElse(currentValue);
   }
 }

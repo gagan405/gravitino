@@ -39,6 +39,7 @@ import java.util.stream.Stream;
 import javax.sql.DataSource;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.Catalog;
+import org.apache.gravitino.GravitinoEnv;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.SchemaChange;
@@ -50,6 +51,7 @@ import org.apache.gravitino.catalog.jdbc.converter.JdbcTypeConverter;
 import org.apache.gravitino.catalog.jdbc.operation.DatabaseOperation;
 import org.apache.gravitino.catalog.jdbc.operation.JdbcDatabaseOperations;
 import org.apache.gravitino.catalog.jdbc.operation.JdbcTableOperations;
+import org.apache.gravitino.catalog.jdbc.operation.RequireDatabaseOperation;
 import org.apache.gravitino.catalog.jdbc.operation.TableOperation;
 import org.apache.gravitino.catalog.jdbc.utils.DataSourceUtils;
 import org.apache.gravitino.connector.CatalogInfo;
@@ -63,6 +65,8 @@ import org.apache.gravitino.exceptions.NonEmptySchemaException;
 import org.apache.gravitino.exceptions.SchemaAlreadyExistsException;
 import org.apache.gravitino.exceptions.TableAlreadyExistsException;
 import org.apache.gravitino.meta.AuditInfo;
+import org.apache.gravitino.metrics.MetricsSystem;
+import org.apache.gravitino.metrics.source.JdbcCatalogMetricsSource;
 import org.apache.gravitino.rel.Column;
 import org.apache.gravitino.rel.Table;
 import org.apache.gravitino.rel.TableCatalog;
@@ -98,8 +102,11 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
   private final TableOperation tableOperation;
 
   private DataSource dataSource;
+  private String jdbcUrl;
 
   private final JdbcColumnDefaultValueConverter columnDefaultValueConverter;
+
+  private JdbcCatalogMetricsSource catalogMetricsSource;
 
   public static class JDBCDriverInfo {
     public String name;
@@ -164,18 +171,58 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
     resultConf.putAll(gravitinoConfig);
 
     JdbcConfig jdbcConfig = new JdbcConfig(resultConf);
+    this.jdbcUrl = jdbcConfig.getJdbcUrl();
     this.dataSource = DataSourceUtils.createDataSource(jdbcConfig);
 
     checkJDBCDriverVersion();
     this.databaseOperation.initialize(dataSource, exceptionConverter, resultConf);
     this.tableOperation.initialize(
         dataSource, exceptionConverter, jdbcTypeConverter, columnDefaultValueConverter, resultConf);
+    if (tableOperation instanceof RequireDatabaseOperation) {
+      ((RequireDatabaseOperation) tableOperation).setDatabaseOperation(databaseOperation);
+    }
+
+    MetricsSystem metricsSystem = GravitinoEnv.getInstance().metricsSystem();
+    // Metrics System could be null in UT.
+    if (metricsSystem != null) {
+      this.catalogMetricsSource =
+          new JdbcCatalogMetricsSource(info.namespace().toString(), info.name());
+      catalogMetricsSource.registerDatasourceMetrics(dataSource);
+      metricsSystem.register(catalogMetricsSource);
+    }
   }
 
   /** Closes the Jdbc catalog and releases the associated client pool. */
   @Override
   public void close() {
+    // Metrics System could be null in UT.
+    MetricsSystem metricsSystem = GravitinoEnv.getInstance().metricsSystem();
+    if (metricsSystem != null) {
+      metricsSystem.unregister(catalogMetricsSource);
+    }
     DataSourceUtils.closeDataSource(dataSource);
+    try {
+      Driver driver = getDriver();
+      if (driver != null) {
+        deregisterDriver(driver);
+      }
+    } catch (SQLException e) {
+      LOG.warn("Failed to deregister JDBC driver", e);
+    }
+  }
+
+  /**
+   * Gets the JDBC driver for the provided JDBC URL.
+   *
+   * @return The JDBC driver instance if the JDBC URL is not blank; null if the JDBC URL is blank.
+   * @throws SQLException if failing to get driver from JDBC URL.
+   */
+  protected Driver getDriver() throws SQLException {
+    if (StringUtils.isBlank(jdbcUrl)) {
+      return null;
+    }
+
+    return DriverManager.getDriver(jdbcUrl);
   }
 
   /**
@@ -226,9 +273,9 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
   public JdbcSchema createSchema(
       NameIdentifier ident, String comment, Map<String, String> properties)
       throws NoSuchCatalogException, SchemaAlreadyExistsException {
-    StringIdentifier identifier =
-        Preconditions.checkNotNull(
-            StringIdentifier.fromProperties(properties), GRAVITINO_ATTRIBUTE_DOES_NOT_EXIST_MSG);
+
+    StringIdentifier identifier = StringIdentifier.fromProperties(properties);
+    Preconditions.checkArgument(identifier != null, GRAVITINO_ATTRIBUTE_DOES_NOT_EXIST_MSG);
     String notAllowedKey =
         properties.keySet().stream()
             .filter(s -> !StringUtils.equals(s, StringIdentifier.ID_KEY))
@@ -348,6 +395,7 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
         .withName(tableName)
         .withColumns(load.columns())
         .withAuditInfo(load.auditInfo())
+        .withSortOrders(load.sortOrder())
         .withComment(comment)
         .withProperties(properties)
         .withDistribution(load.distribution())
@@ -427,12 +475,16 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
       SortOrder[] sortOrders,
       Index[] indexes)
       throws NoSuchSchemaException, TableAlreadyExistsException {
-    Preconditions.checkArgument(
-        null == sortOrders || sortOrders.length == 0, "jdbc-catalog does not support sort orders");
+    JdbcTableOperations jdbcTableOperations = (JdbcTableOperations) tableOperation;
+    if (!jdbcTableOperations.supportsTableSortOrder()) {
+      Preconditions.checkArgument(
+          null == sortOrders || sortOrders.length == 0,
+          "The current JDBC connector: %s does not support sort orders",
+          jdbcTableOperations.getClass().getName());
+    }
 
-    StringIdentifier identifier =
-        Preconditions.checkNotNull(
-            StringIdentifier.fromProperties(properties), GRAVITINO_ATTRIBUTE_DOES_NOT_EXIST_MSG);
+    StringIdentifier identifier = StringIdentifier.fromProperties(properties);
+    Preconditions.checkArgument(identifier != null, GRAVITINO_ATTRIBUTE_DOES_NOT_EXIST_MSG);
     // The properties we write to the database do not require the id field, so it needs to be
     // removed.
     HashMap<String, String> resultProperties =
@@ -461,7 +513,8 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
         resultProperties,
         partitioning,
         distribution,
-        indexes);
+        indexes,
+        sortOrders);
 
     return JdbcTable.builder()
         .withAuditInfo(
@@ -471,6 +524,8 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
         .withComment(comment)
         .withProperties(jdbcTablePropertiesMetadata.convertFromJdbcProperties(resultProperties))
         .withPartitioning(partitioning)
+        .withSortOrders(sortOrders)
+        .withDistribution(distribution)
         .withIndexes(indexes)
         .withDatabaseName(databaseName)
         .withTableOperation(tableOperation)
@@ -501,6 +556,8 @@ public class JdbcCatalogOperations implements CatalogOperations, SupportsSchemas
    */
   private Table renameTable(NameIdentifier tableIdent, TableChange.RenameTable renameTable)
       throws NoSuchTableException, IllegalArgumentException {
+    Preconditions.checkArgument(
+        !renameTable.getNewSchemaName().isPresent(), "Does not support rename schema yet");
     String databaseName = NameIdentifier.of(tableIdent.namespace().levels()).name();
     tableOperation.rename(databaseName, tableIdent.name(), renameTable.getNewName());
     return loadTable(NameIdentifier.of(tableIdent.namespace(), renameTable.getNewName()));

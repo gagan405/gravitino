@@ -126,13 +126,17 @@ public class AccessControlHookDispatcher implements AccessControlDispatcher {
   @Override
   public Group grantRolesToGroup(String metalake, List<String> roles, String group)
       throws NoSuchGroupException, IllegalRoleException, NoSuchMetalakeException {
-    return dispatcher.grantRolesToGroup(metalake, roles, group);
+    Group grantedGroup = dispatcher.grantRolesToGroup(metalake, roles, group);
+    notifyRoleUserRelChange(metalake, roles);
+    return grantedGroup;
   }
 
   @Override
   public Group revokeRolesFromGroup(String metalake, List<String> roles, String group)
       throws NoSuchGroupException, IllegalRoleException, NoSuchMetalakeException {
-    return dispatcher.revokeRolesFromGroup(metalake, roles, group);
+    Group revokedGroup = dispatcher.revokeRolesFromGroup(metalake, roles, group);
+    notifyRoleUserRelChange(metalake, roles);
+    return revokedGroup;
   }
 
   @Override
@@ -155,9 +159,6 @@ public class AccessControlHookDispatcher implements AccessControlDispatcher {
       Map<String, String> properties,
       List<SecurableObject> securableObjects)
       throws RoleAlreadyExistsException, NoSuchMetalakeException {
-    // Check whether the current user exists or not
-    AuthorizationUtils.checkCurrentUser(metalake, PrincipalUtils.getCurrentUserName());
-
     Role createdRole = dispatcher.createRole(metalake, role, properties, securableObjects);
 
     // Set the creator as the owner of role.
@@ -188,7 +189,7 @@ public class AccessControlHookDispatcher implements AccessControlDispatcher {
       log.debug(e.getMessage());
     }
     boolean resultOfDeleteRole = dispatcher.deleteRole(metalake, role);
-    if (oldRole != null) {
+    if (resultOfDeleteRole && oldRole != null) {
       notifyRoleUserRelChange(((RoleEntity) oldRole).id());
     }
     return resultOfDeleteRole;
@@ -221,6 +222,16 @@ public class AccessControlHookDispatcher implements AccessControlDispatcher {
     Role revokedRole = dispatcher.revokePrivilegesFromRole(metalake, role, object, privileges);
     notifyRoleUserRelChange(metalake, role);
     return revokedRole;
+  }
+
+  @Override
+  public Role overridePrivilegesInRole(
+      String metalake, String role, List<SecurableObject> securableObjectsToOverride)
+      throws NoSuchRoleException, NoSuchMetalakeException {
+    Role overriddenRole =
+        dispatcher.overridePrivilegesInRole(metalake, role, securableObjectsToOverride);
+    notifyRoleUserRelChange(metalake, role);
+    return overriddenRole;
   }
 
   private static void notifyRoleUserRelChange(String metalake, List<String> roles) {

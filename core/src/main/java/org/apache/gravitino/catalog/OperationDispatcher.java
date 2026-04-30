@@ -92,8 +92,6 @@ public abstract class OperationDispatcher {
   protected <R, E extends Throwable> R doWithCatalog(
       NameIdentifier ident, ThrowableFunction<CatalogManager.CatalogWrapper, R> fn, Class<E> ex)
       throws E {
-    catalogManager.checkCatalogInUse(store, ident);
-
     try {
       CatalogManager.CatalogWrapper c = catalogManager.loadCatalogAndWrap(ident);
       return fn.apply(c);
@@ -114,8 +112,6 @@ public abstract class OperationDispatcher {
       Class<E1> ex1,
       Class<E2> ex2)
       throws E1, E2 {
-    catalogManager.checkCatalogInUse(store, ident);
-
     try {
       CatalogManager.CatalogWrapper c = catalogManager.loadCatalogAndWrap(ident);
       return fn.apply(c);
@@ -237,7 +233,11 @@ public abstract class OperationDispatcher {
     try {
       return store.get(ident, type, entityClass);
     } catch (Exception e) {
-      LOG.warn(FormattedErrorMessages.STORE_OP_FAILURE, "get", ident, e.getMessage(), e);
+      // Fix unexpected error messages like "2026-02-26T14:33:11.810125Z Gravitino-webserver-91 WARN
+      // found 2 argument placeholders, but provided 4 for pattern `Failed to {} entity for {} in
+      // Gravitino, with this situation the returned object will not contain the metadata from
+      // Gravitino.`" in ${GRAVITINO_HOME}/logs/gravitino-server.out.
+      LOG.warn(FormattedErrorMessages.STORE_OP_FAILURE, "get", ident, e);
       return null;
     }
   }

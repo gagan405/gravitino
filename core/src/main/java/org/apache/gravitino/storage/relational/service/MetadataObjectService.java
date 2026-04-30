@@ -18,31 +18,49 @@
  */
 package org.apache.gravitino.storage.relational.service;
 
+import static org.apache.gravitino.metrics.source.MetricsSource.GRAVITINO_RELATIONAL_STORE_METRIC_NAME;
+
 import com.google.common.base.Joiner;
-import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.apache.gravitino.Entity;
 import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.MetadataObjects;
+import org.apache.gravitino.job.JobHandle;
+import org.apache.gravitino.meta.GenericEntity;
+import org.apache.gravitino.metrics.Monitored;
 import org.apache.gravitino.storage.relational.mapper.CatalogMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.FilesetMetaMapper;
+import org.apache.gravitino.storage.relational.mapper.FunctionMetaMapper;
+import org.apache.gravitino.storage.relational.mapper.JobTemplateMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.MetalakeMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.ModelMetaMapper;
+import org.apache.gravitino.storage.relational.mapper.PolicyMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.SchemaMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.TableColumnMapper;
 import org.apache.gravitino.storage.relational.mapper.TableMetaMapper;
+import org.apache.gravitino.storage.relational.mapper.TagMetaMapper;
 import org.apache.gravitino.storage.relational.mapper.TopicMetaMapper;
+import org.apache.gravitino.storage.relational.mapper.ViewMetaMapper;
 import org.apache.gravitino.storage.relational.po.CatalogPO;
 import org.apache.gravitino.storage.relational.po.ColumnPO;
 import org.apache.gravitino.storage.relational.po.FilesetPO;
+import org.apache.gravitino.storage.relational.po.FunctionPO;
+import org.apache.gravitino.storage.relational.po.JobTemplatePO;
 import org.apache.gravitino.storage.relational.po.MetalakePO;
 import org.apache.gravitino.storage.relational.po.ModelPO;
+import org.apache.gravitino.storage.relational.po.PolicyPO;
 import org.apache.gravitino.storage.relational.po.SchemaPO;
 import org.apache.gravitino.storage.relational.po.TablePO;
+import org.apache.gravitino.storage.relational.po.TagPO;
 import org.apache.gravitino.storage.relational.po.TopicPO;
+import org.apache.gravitino.storage.relational.po.ViewPO;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,68 +73,138 @@ public class MetadataObjectService {
 
   private static final String DOT = ".";
   private static final Joiner DOT_JOINER = Joiner.on(DOT);
-  private static final Splitter DOT_SPLITTER = Splitter.on(DOT);
-
   private static final Logger LOG = LoggerFactory.getLogger(MetadataObjectService.class);
 
   static final Map<MetadataObject.Type, Function<List<Long>, Map<Long, String>>>
       TYPE_TO_FULLNAME_FUNCTION_MAP =
-          ImmutableMap.of(
-              MetadataObject.Type.METALAKE, MetadataObjectService::getMetalakeObjectsFullName,
-              MetadataObject.Type.CATALOG, MetadataObjectService::getCatalogObjectsFullName,
-              MetadataObject.Type.SCHEMA, MetadataObjectService::getSchemaObjectsFullName,
-              MetadataObject.Type.TABLE, MetadataObjectService::getTableObjectsFullName,
-              MetadataObject.Type.FILESET, MetadataObjectService::getFilesetObjectsFullName,
-              MetadataObject.Type.MODEL, MetadataObjectService::getModelObjectsFullName,
-              MetadataObject.Type.TOPIC, MetadataObjectService::getTopicObjectsFullName,
-              MetadataObject.Type.COLUMN, MetadataObjectService::getColumnObjectsFullName);
+          ImmutableMap.<MetadataObject.Type, Function<List<Long>, Map<Long, String>>>builder()
+              .put(MetadataObject.Type.METALAKE, MetadataObjectService::getMetalakeObjectsFullName)
+              .put(MetadataObject.Type.CATALOG, MetadataObjectService::getCatalogObjectsFullName)
+              .put(MetadataObject.Type.SCHEMA, MetadataObjectService::getSchemaObjectsFullName)
+              .put(MetadataObject.Type.TABLE, MetadataObjectService::getTableObjectsFullName)
+              .put(MetadataObject.Type.FILESET, MetadataObjectService::getFilesetObjectsFullName)
+              .put(MetadataObject.Type.MODEL, MetadataObjectService::getModelObjectsFullName)
+              .put(MetadataObject.Type.FUNCTION, MetadataObjectService::getFunctionObjectsFullName)
+              .put(MetadataObject.Type.TOPIC, MetadataObjectService::getTopicObjectsFullName)
+              .put(MetadataObject.Type.VIEW, MetadataObjectService::getViewObjectsFullName)
+              .put(MetadataObject.Type.COLUMN, MetadataObjectService::getColumnObjectsFullName)
+              .put(MetadataObject.Type.TAG, MetadataObjectService::getTagObjectsFullName)
+              .put(MetadataObject.Type.POLICY, MetadataObjectService::getPolicyObjectsFullName)
+              .put(MetadataObject.Type.JOB, MetadataObjectService::getJobObjectsFullName)
+              .put(
+                  MetadataObject.Type.JOB_TEMPLATE,
+                  MetadataObjectService::getJobTemplateObjectsFullName)
+              .build();
+
+  private static Map<Long, String> getPolicyObjectsFullName(List<Long> policyIds) {
+    if (policyIds == null || policyIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    List<PolicyPO> policyPOs =
+        SessionUtils.getWithoutCommit(
+            PolicyMetaMapper.class, mapper -> mapper.listPolicyPOsByPolicyIds(policyIds));
+
+    if (policyPOs == null || policyPOs.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    HashMap<Long, String> policyIdAndNameMap = new HashMap<>();
+
+    policyPOs.forEach(
+        policyPO -> policyIdAndNameMap.put(policyPO.getPolicyId(), policyPO.getPolicyName()));
+
+    return policyIdAndNameMap;
+  }
+
+  private static Map<Long, String> getJobObjectsFullName(List<Long> jobIds) {
+    if (jobIds == null || jobIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    return jobIds.stream()
+        .collect(Collectors.toMap(jobId -> jobId, jobId -> JobHandle.JOB_ID_PREFIX + jobId));
+  }
+
+  private static Map<Long, String> getJobTemplateObjectsFullName(List<Long> jobTemplateIds) {
+    if (jobTemplateIds == null || jobTemplateIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    List<JobTemplatePO> jobTemplatePOs =
+        SessionUtils.getWithoutCommit(
+            JobTemplateMetaMapper.class,
+            mapper -> mapper.listJobTemplatePOsByJobTemplateIds(jobTemplateIds));
+
+    if (jobTemplatePOs == null || jobTemplatePOs.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    HashMap<Long, String> jobTemplateIdAndNameMap = new HashMap<>();
+
+    jobTemplatePOs.forEach(
+        jobTemplatePO ->
+            jobTemplateIdAndNameMap.put(
+                jobTemplatePO.jobTemplateId(), jobTemplatePO.jobTemplateName()));
+
+    return jobTemplateIdAndNameMap;
+  }
+
+  private static Map<Long, String> getTagObjectsFullName(List<Long> tagIds) {
+    if (tagIds == null || tagIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    List<TagPO> tagPOs =
+        SessionUtils.getWithoutCommit(
+            TagMetaMapper.class, mapper -> mapper.listTagPOsByTagIds(tagIds));
+
+    if (tagPOs == null || tagPOs.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    HashMap<Long, String> tagIdAndNameMap = new HashMap<>();
+
+    tagPOs.forEach(tagPO -> tagIdAndNameMap.put(tagPO.getTagId(), tagPO.getTagName()));
+
+    return tagIdAndNameMap;
+  }
 
   private MetadataObjectService() {}
 
-  public static long getMetadataObjectId(
-      long metalakeId, String fullName, MetadataObject.Type type) {
-    if (type == MetadataObject.Type.METALAKE) {
-      return MetalakeMetaService.getInstance().getMetalakeIdByName(fullName);
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "fromGenericEntities")
+  public static List<MetadataObject> fromGenericEntities(List<GenericEntity> entities) {
+    if (entities == null || entities.isEmpty()) {
+      return Lists.newArrayList();
     }
 
-    if (type == MetadataObject.Type.ROLE) {
-      return RoleMetaService.getInstance().getRoleIdByMetalakeIdAndName(metalakeId, fullName);
-    }
-    List<String> names = DOT_SPLITTER.splitToList(fullName);
+    Map<Entity.EntityType, List<Long>> groupIdsByType =
+        entities.stream()
+            .collect(
+                Collectors.groupingBy(
+                    GenericEntity::type,
+                    Collectors.mapping(GenericEntity::id, Collectors.toList())));
 
-    long catalogId =
-        CatalogMetaService.getInstance().getCatalogIdByMetalakeIdAndName(metalakeId, names.get(0));
-    if (type == MetadataObject.Type.CATALOG) {
-      return catalogId;
-    }
+    List<MetadataObject> metadataObjects = Lists.newArrayList();
+    for (Map.Entry<Entity.EntityType, List<Long>> entry : groupIdsByType.entrySet()) {
+      MetadataObject.Type objectType = MetadataObject.Type.valueOf(entry.getKey().name());
+      Map<Long, String> metadataObjectNames =
+          TYPE_TO_FULLNAME_FUNCTION_MAP.get(objectType).apply(entry.getValue());
 
-    long schemaId =
-        SchemaMetaService.getInstance().getSchemaIdByCatalogIdAndName(catalogId, names.get(1));
-    if (type == MetadataObject.Type.SCHEMA) {
-      return schemaId;
-    }
+      for (Map.Entry<Long, String> metadataObjectName : metadataObjectNames.entrySet()) {
+        String fullName = metadataObjectName.getValue();
 
-    if (type == MetadataObject.Type.FILESET) {
-      return FilesetMetaService.getInstance().getFilesetIdBySchemaIdAndName(schemaId, names.get(2));
-    } else if (type == MetadataObject.Type.TOPIC) {
-      return TopicMetaService.getInstance().getTopicIdBySchemaIdAndName(schemaId, names.get(2));
-    } else if (type == MetadataObject.Type.MODEL) {
-      return ModelMetaService.getInstance()
-          .getModelIdBySchemaIdAndModelName(schemaId, names.get(2));
+        // Metadata object may be deleted asynchronously when we query the name, so it will
+        // return null, we should skip this metadata object.
+        if (fullName != null) {
+          metadataObjects.add(MetadataObjects.parse(fullName, objectType));
+        }
+      }
     }
 
-    long tableId =
-        TableMetaService.getInstance().getTableIdBySchemaIdAndName(schemaId, names.get(2));
-    if (type == MetadataObject.Type.TABLE) {
-      return tableId;
-    }
-
-    if (type == MetadataObject.Type.COLUMN) {
-      return TableColumnMetaService.getInstance()
-          .getColumnIdByTableIdAndName(tableId, names.get(3));
-    }
-
-    throw new IllegalArgumentException(String.format("Doesn't support the type %s", type));
+    return metadataObjects;
   }
 
   /**
@@ -128,6 +216,9 @@ public class MetadataObjectService {
    *     if no Metalake objects are found for the given IDs. {@code @example} value of metalake full
    *     name: "metalake1.catalog1.schema1.table1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getMetalakeObjectsFullName")
   public static Map<Long, String> getMetalakeObjectsFullName(List<Long> metalakeIds) {
     List<MetalakePO> metalakePOs =
         SessionUtils.getWithoutCommit(
@@ -155,6 +246,9 @@ public class MetadataObjectService {
    *     if no Fileset objects are found for the given IDs. {@code @example} value of fileset full
    *     name: "catalog1.schema1.fileset1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getFilesetObjectsFullName")
   public static Map<Long, String> getFilesetObjectsFullName(List<Long> filesetIds) {
     List<FilesetPO> filesetPOs =
         SessionUtils.getWithoutCommit(
@@ -198,6 +292,9 @@ public class MetadataObjectService {
    *     no Model objects are found for the given IDs. {@code @example} value of model full name:
    *     "catalog1.schema1.model1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getModelObjectsFullName")
   public static Map<Long, String> getModelObjectsFullName(List<Long> modelIds) {
     List<ModelPO> modelPOs =
         SessionUtils.getWithoutCommit(
@@ -232,6 +329,56 @@ public class MetadataObjectService {
   }
 
   /**
+   * Retrieves a map of Function object IDs to their full names.
+   *
+   * @param functionIds A list of Function object IDs to fetch names for.
+   * @return A Map where the key is the Function ID and the value is the Function full name. The map
+   *     may contain null values for the names if its parent object is deleted. Returns an empty map
+   *     if no Function objects are found for the given IDs. {@code @example} value of function full
+   *     name: "catalog1.schema1.function1"
+   */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getFunctionObjectsFullName")
+  public static Map<Long, String> getFunctionObjectsFullName(List<Long> functionIds) {
+    if (functionIds == null || functionIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
+    List<FunctionPO> functionPOs =
+        SessionUtils.getWithoutCommit(
+            FunctionMetaMapper.class, mapper -> mapper.listFunctionPOsByFunctionIds(functionIds));
+
+    if (functionPOs == null || functionPOs.isEmpty()) {
+      return new HashMap<>();
+    }
+
+    List<Long> schemaIds =
+        functionPOs.stream().map(FunctionPO::schemaId).collect(Collectors.toList());
+
+    Map<Long, String> schemaIdAndNameMap = getSchemaObjectsFullName(schemaIds);
+
+    HashMap<Long, String> functionIdAndNameMap = new HashMap<>();
+
+    functionPOs.forEach(
+        functionPO -> {
+          // since the schema can be deleted, we need to check the null value,
+          // and when schema is deleted, we will set fullName of functionPO to null.
+          String schemaName = schemaIdAndNameMap.getOrDefault(functionPO.schemaId(), null);
+          if (schemaName == null) {
+            LOG.warn("The schema of function {} may be deleted", functionPO.functionId());
+            functionIdAndNameMap.put(functionPO.functionId(), null);
+            return;
+          }
+
+          String fullName = DOT_JOINER.join(schemaName, functionPO.functionName());
+          functionIdAndNameMap.put(functionPO.functionId(), fullName);
+        });
+
+    return functionIdAndNameMap;
+  }
+
+  /**
    * Retrieves a map of Table object IDs to their full names.
    *
    * @param tableIds A list of Table object IDs to fetch names for.
@@ -240,13 +387,20 @@ public class MetadataObjectService {
    *     no Table objects are found for the given IDs. {@code @example} value of table full name:
    *     "catalog1.schema1.table1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getTableObjectsFullName")
   public static Map<Long, String> getTableObjectsFullName(List<Long> tableIds) {
+    if (tableIds == null || tableIds.isEmpty()) {
+      return Maps.newHashMap();
+    }
+
     List<TablePO> tablePOs =
         SessionUtils.getWithoutCommit(
             TableMetaMapper.class, mapper -> mapper.listTablePOsByTableIds(tableIds));
 
     if (tablePOs == null || tablePOs.isEmpty()) {
-      return new HashMap<>();
+      return Maps.newHashMap();
     }
 
     List<Long> schemaIds = tablePOs.stream().map(TablePO::getSchemaId).collect(Collectors.toList());
@@ -283,6 +437,9 @@ public class MetadataObjectService {
    *     no column objects are found for the given IDs. {@code @example} value of table full name:
    *     "catalog1.schema1.table1.column1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getColumnObjectsFullName")
   public static Map<Long, String> getColumnObjectsFullName(List<Long> columnsIds) {
     List<ColumnPO> columnPOs =
         SessionUtils.getWithoutCommit(
@@ -328,6 +485,9 @@ public class MetadataObjectService {
    *     no Topic objects are found for the given IDs. {@code @example} value of topic full name:
    *     "catalog1.schema1.topic1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getTopicObjectsFullName")
   public static Map<Long, String> getTopicObjectsFullName(List<Long> topicIds) {
     List<TopicPO> topicPOs =
         SessionUtils.getWithoutCommit(
@@ -362,6 +522,44 @@ public class MetadataObjectService {
   }
 
   /**
+   * Retrieves a map of View object IDs to their full names.
+   *
+   * @param viewIds A list of View object IDs to fetch names for.
+   * @return A Map where the key is the View ID and the value is the View full name. The map may
+   *     contain null values for the names if its parent object is deleted. Returns an empty map if
+   *     no View objects are found for the given IDs. {@code @example} value of view full name:
+   *     "catalog1.schema1.view1"
+   */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getViewObjectsFullName")
+  public static Map<Long, String> getViewObjectsFullName(List<Long> viewIds) {
+    List<ViewPO> viewPOs =
+        SessionUtils.getWithoutCommit(
+            ViewMetaMapper.class, mapper -> mapper.listViewPOsByViewIds(viewIds));
+    if (viewPOs == null || viewPOs.isEmpty()) {
+      return new HashMap<>();
+    }
+    List<Long> schemaIds = viewPOs.stream().map(ViewPO::getSchemaId).collect(Collectors.toList());
+    Map<Long, String> schemaIdAndNameMap = getSchemaObjectsFullName(schemaIds);
+    HashMap<Long, String> viewIdAndNameMap = new HashMap<>();
+    viewPOs.forEach(
+        viewPO -> {
+          // since the schema can be deleted, we need to check the null value,
+          // and when schema is deleted, we will set fullName of viewPO to null.
+          String schemaName = schemaIdAndNameMap.getOrDefault(viewPO.getSchemaId(), null);
+          if (schemaName == null) {
+            LOG.warn("The schema of view {} may be deleted", viewPO.getViewId());
+            viewIdAndNameMap.put(viewPO.getViewId(), null);
+            return;
+          }
+          String fullName = DOT_JOINER.join(schemaName, viewPO.getViewName());
+          viewIdAndNameMap.put(viewPO.getViewId(), fullName);
+        });
+    return viewIdAndNameMap;
+  }
+
+  /**
    * Retrieves a map of Catalog object IDs to their full names.
    *
    * @param catalogIds A list of Catalog object IDs to fetch names for.
@@ -370,6 +568,9 @@ public class MetadataObjectService {
    *     if no Catalog objects are found for the given IDs. {@code @example} value of catalog full
    *     name: "catalog1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getCatalogObjectsFullName")
   public static Map<Long, String> getCatalogObjectsFullName(List<Long> catalogIds) {
     List<CatalogPO> catalogPOs =
         SessionUtils.getWithoutCommit(
@@ -396,6 +597,9 @@ public class MetadataObjectService {
    *     no Schema objects are found for the given IDs. {@code @example} value of schema full name:
    *     "catalog1.schema1"
    */
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "getSchemaObjectsFullName")
   public static Map<Long, String> getSchemaObjectsFullName(List<Long> schemaIds) {
     List<SchemaPO> schemaPOs =
         SessionUtils.getWithoutCommit(

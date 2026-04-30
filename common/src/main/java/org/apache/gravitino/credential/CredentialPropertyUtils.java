@@ -21,8 +21,11 @@ package org.apache.gravitino.credential;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Helper class to generate specific credential properties for different table format and engine.
@@ -46,26 +49,31 @@ public class CredentialPropertyUtils {
   @VisibleForTesting
   static final String ICEBERG_ADLS_ACCOUNT_KEY = "adls.auth.shared-key.account.key";
 
+  private static final String GCS_OAUTH_2_TOKEN_EXPIRES_AT = "gcs.oauth2.token-expires-at";
+
   private static Map<String, String> icebergCredentialPropertyMap =
-      ImmutableMap.of(
-          GCSTokenCredential.GCS_TOKEN_NAME,
-          ICEBERG_GCS_TOKEN,
-          S3SecretKeyCredential.GRAVITINO_S3_STATIC_ACCESS_KEY_ID,
-          ICEBERG_S3_ACCESS_KEY_ID,
-          S3SecretKeyCredential.GRAVITINO_S3_STATIC_SECRET_ACCESS_KEY,
-          ICEBERG_S3_SECRET_ACCESS_KEY,
-          S3TokenCredential.GRAVITINO_S3_TOKEN,
-          ICEBERG_S3_TOKEN,
-          OSSTokenCredential.GRAVITINO_OSS_TOKEN,
-          ICEBERG_OSS_SECURITY_TOKEN,
-          OSSTokenCredential.GRAVITINO_OSS_SESSION_ACCESS_KEY_ID,
-          ICEBERG_OSS_ACCESS_KEY_ID,
-          OSSTokenCredential.GRAVITINO_OSS_SESSION_SECRET_ACCESS_KEY,
-          ICEBERG_OSS_ACCESS_KEY_SECRET,
-          AzureAccountKeyCredential.GRAVITINO_AZURE_STORAGE_ACCOUNT_NAME,
-          ICEBERG_ADLS_ACCOUNT_NAME,
-          AzureAccountKeyCredential.GRAVITINO_AZURE_STORAGE_ACCOUNT_KEY,
-          ICEBERG_ADLS_ACCOUNT_KEY);
+      ImmutableMap.<String, String>builder()
+          .put(GCSTokenCredential.GCS_TOKEN_NAME, ICEBERG_GCS_TOKEN)
+          .put(S3SecretKeyCredential.GRAVITINO_S3_STATIC_ACCESS_KEY_ID, ICEBERG_S3_ACCESS_KEY_ID)
+          .put(
+              S3SecretKeyCredential.GRAVITINO_S3_STATIC_SECRET_ACCESS_KEY,
+              ICEBERG_S3_SECRET_ACCESS_KEY)
+          .put(S3TokenCredential.GRAVITINO_S3_TOKEN, ICEBERG_S3_TOKEN)
+          .put(OSSTokenCredential.GRAVITINO_OSS_TOKEN, ICEBERG_OSS_SECURITY_TOKEN)
+          .put(OSSTokenCredential.GRAVITINO_OSS_SESSION_ACCESS_KEY_ID, ICEBERG_OSS_ACCESS_KEY_ID)
+          .put(
+              OSSTokenCredential.GRAVITINO_OSS_SESSION_SECRET_ACCESS_KEY,
+              ICEBERG_OSS_ACCESS_KEY_SECRET)
+          .put(
+              AzureAccountKeyCredential.GRAVITINO_AZURE_STORAGE_ACCOUNT_NAME,
+              ICEBERG_ADLS_ACCOUNT_NAME)
+          .put(
+              AzureAccountKeyCredential.GRAVITINO_AZURE_STORAGE_ACCOUNT_KEY,
+              ICEBERG_ADLS_ACCOUNT_KEY)
+          .put(AwsIrsaCredential.ACCESS_KEY_ID, ICEBERG_S3_ACCESS_KEY_ID)
+          .put(AwsIrsaCredential.SECRET_ACCESS_KEY, ICEBERG_S3_SECRET_ACCESS_KEY)
+          .put(AwsIrsaCredential.SESSION_TOKEN, ICEBERG_S3_TOKEN)
+          .build();
 
   /**
    * Transforms a specific credential into a map of Iceberg properties.
@@ -78,7 +86,8 @@ public class CredentialPropertyUtils {
         || credential instanceof S3SecretKeyCredential
         || credential instanceof OSSTokenCredential
         || credential instanceof OSSSecretKeyCredential
-        || credential instanceof AzureAccountKeyCredential) {
+        || credential instanceof AzureAccountKeyCredential
+        || credential instanceof AwsIrsaCredential) {
       return transformProperties(credential.credentialInfo(), icebergCredentialPropertyMap);
     }
 
@@ -86,7 +95,7 @@ public class CredentialPropertyUtils {
       Map<String, String> icebergGCSCredentialProperties =
           transformProperties(credential.credentialInfo(), icebergCredentialPropertyMap);
       icebergGCSCredentialProperties.put(
-          "gcs.oauth2.token-expires-at", String.valueOf(credential.expireTimeInMs()));
+          GCS_OAUTH_2_TOKEN_EXPIRES_AT, String.valueOf(credential.expireTimeInMs()));
       return icebergGCSCredentialProperties;
     }
 
@@ -103,6 +112,29 @@ public class CredentialPropertyUtils {
     }
 
     return credential.toProperties();
+  }
+
+  /**
+   * Filters a property map down to only Iceberg credential-related keys.
+   *
+   * <p>This is used when an Iceberg table load response contains many table and catalog properties,
+   * but the caller only needs the temporary credential properties that should be forwarded to the
+   * Iceberg client.
+   *
+   * @param properties the source properties to filter
+   * @return a map containing only credential properties recognized by Iceberg
+   */
+  public static Map<String, String> filterCredentialProperties(Map<String, String> properties) {
+    Set<String> credentialPropertyKeys = Sets.newHashSet(icebergCredentialPropertyMap.values());
+    credentialPropertyKeys.add(GCS_OAUTH_2_TOKEN_EXPIRES_AT);
+    Map<String, String> filteredProperties = Maps.newHashMap(properties);
+    filteredProperties
+        .entrySet()
+        .removeIf(
+            entry ->
+                !credentialPropertyKeys.contains(entry.getKey())
+                    && !entry.getKey().startsWith(ICEBERG_ADLS_TOKEN));
+    return filteredProperties;
   }
 
   private static Map<String, String> transformProperties(

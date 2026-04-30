@@ -20,6 +20,7 @@ package org.apache.gravitino.trino.connector.integration.test;
 
 import java.io.File;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -32,7 +33,7 @@ public class TrinoQueryTestTool {
 
   public static void main(String[] args) throws Exception {
     Options options = new Options();
-
+    boolean isFailed = false;
     try {
       options.addOption(
           "auto",
@@ -85,6 +86,28 @@ public class TrinoQueryTestTool {
           "Additional parameters that can replace the value of ${key} in the testers contents, "
               + "example: --params=key1,v1;key2,v2");
 
+      options.addOption(
+          "trino_worker_num",
+          true,
+          "Specify the number of Trino independent worker, the default value is 0."
+              + "Use a distributed cluster for integration testing when necessary (value > 0), "
+              + "otherwise fall back to a single-node setup with combined coordinator-worker roles.");
+
+      options.addOption(
+          "trino_version", true, "Specify the Trino version to test, the default value is 435.");
+
+      options.addOption(
+          "trino_connector_dir",
+          true,
+          "Specify the Gravitino connector JAR path. "
+              + "The JAR file under ${trino_connector_dir} will be copied into the test image, "
+              + "the default value is ${project_root}/trino-connector/trino-connector/build/libs.");
+
+      options.addOption(
+          "env_only",
+          false,
+          "Start the environment (Gravitino + Trino) and keep it running for manual testing. Press Ctrl+C to shutdown.");
+
       options.addOption("help", false, "Print this help message");
 
       CommandLineParser parser = new PosixParser();
@@ -97,6 +120,12 @@ public class TrinoQueryTestTool {
             "Examples:\n"
                 + "Run all the testers in the 'testsets' directory:\n"
                 + "TrinoTestTool --auto=all\n\n"
+                + "Run all the testers in the 'testsets' directory with a distributed cluster:\n"
+                + "TrinoTestTool --auto=all --trino_worker_num=3\n\n"
+                + "Run all the testers in the 'testsets' directory with specific trino version:\n"
+                + "TrinoTestTool --auto=all --trino_version=435\n\n"
+                + "Run all the testers in the 'testsets' directory with specific trino connector JAR files:\n"
+                + "TrinoTestTool --auto=all --trino_connector_dir=./trino-connector/libs\n\n"
                 + "Run all the tpch testset's testers in the 'testsets/tpch' directory:\n"
                 + "TrinoTestTool --testset=tpch --auto=all\n\n"
                 + "Run the tester 'testsets/tpch/00005.sql' in the tpch testset under hive catalog :\n"
@@ -204,13 +233,17 @@ public class TrinoQueryTestTool {
           }
         }
         if (Strings.isNotEmpty(testerId)) {
-          if (Arrays.stream(TrinoQueryIT.listDirectory(testSetDir))
+          if (Arrays.stream(TrinoQueryIT.listTestSetDirectory(testSetDir))
               .noneMatch(f -> f.startsWith(testerId))) {
             System.out.println("The tester " + testerId + " does not found in testset");
             System.exit(1);
           }
         }
       }
+
+      TrinoQueryIT.trinoWorkerNum = extractIntValue(commandLine, "trino_worker_num");
+      TrinoQueryIT.trinoVersion = extractIntValue(commandLine, "trino_version");
+      TrinoQueryIT.trinoConnectorDir = commandLine.getOptionValue("trino_connector_dir");
 
       checkEnv();
 
@@ -227,6 +260,26 @@ public class TrinoQueryTestTool {
         return;
       }
 
+      if (commandLine.hasOption("env_only")) {
+        CountDownLatch shutdownLatch = new CountDownLatch(1);
+        Runtime.getRuntime().addShutdownHook(new Thread(shutdownLatch::countDown));
+
+        System.out.println("=======================================================");
+        System.out.println("Environment is ready for manual testing.");
+        System.out.println("  Gravitino URI : " + TrinoQueryITBase.gravitinoUri);
+        System.out.println("  Trino URI     : " + TrinoQueryITBase.trinoUri);
+        System.out.println("Connect to Trino CLI:");
+        System.out.println("  docker exec -it trino-ci-trino trino");
+        System.out.println("Press Ctrl+C to shutdown the environment.");
+        System.out.println("=======================================================");
+        try {
+          shutdownLatch.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+        return;
+      }
+
       if (testSet == null) {
         testerRunner.testSql();
       } else {
@@ -237,10 +290,40 @@ public class TrinoQueryTestTool {
           testerRunner.totalCount, testerRunner.passCount, testerRunner.generateTestStatus());
     } catch (Exception e) {
       System.out.println(e.getMessage());
-      System.exit(-1);
+      isFailed = true;
     } finally {
-      TrinoQueryIT.cleanup();
+      try {
+        TrinoQueryIT.cleanup();
+      } catch (Exception ex) {
+        System.out.println("Cleanup failed during error handling: " + ex.getMessage());
+      }
+      if (isFailed) {
+        System.exit(-1);
+      }
     }
+  }
+
+  private static Integer extractIntValue(CommandLine commandLine, String key) {
+    String valueConfig = commandLine.getOptionValue(key);
+    if (valueConfig != null) {
+      try {
+        int value = Integer.parseInt(valueConfig);
+        if (value < 0) {
+          System.out.println(
+              "The value of "
+                  + key
+                  + " must be greater than zero, current value is: "
+                  + valueConfig);
+          System.exit(1);
+        }
+        return value;
+      } catch (Exception e) {
+        System.out.println(
+            "The value of " + key + " must be an integer value, current value is: " + valueConfig);
+        System.exit(1);
+      }
+    }
+    return null;
   }
 
   private static void checkEnv() {

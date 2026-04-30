@@ -26,6 +26,7 @@ import java.util.List;
 import org.apache.gravitino.dto.rel.expressions.LiteralDTO;
 import org.apache.gravitino.json.JsonUtils;
 import org.apache.gravitino.rel.TableChange;
+import org.apache.gravitino.rel.TableChange.DeleteIndex;
 import org.apache.gravitino.rel.indexes.Index;
 import org.apache.gravitino.rel.indexes.Indexes;
 import org.apache.gravitino.rel.types.Types;
@@ -66,7 +67,8 @@ public class TestTableUpdatesRequest {
             + "  \"updates\": [\n"
             + "    {\n"
             + "      \"@type\": \"rename\",\n"
-            + "      \"newName\": \"newTable\"\n"
+            + "      \"newName\": \"newTable\",\n"
+            + "      \"newSchemaName\": null\n"
             + "    },\n"
             + "    {\n"
             + "      \"@type\": \"updateComment\",\n"
@@ -138,6 +140,25 @@ public class TestTableUpdatesRequest {
             + "}";
     Assertions.assertEquals(
         JsonUtils.objectMapper().readTree(expected), JsonUtils.objectMapper().readTree(jsonString));
+
+    // validate backward compatibility for renameTable without newSchemaName
+    String renameTableJsonString =
+        "{\n"
+            + "  \"updates\": [\n"
+            + "    {\n"
+            + "      \"@type\": \"rename\",\n"
+            + "      \"newName\": \"newTable\"\n"
+            + "    }\n"
+            + "  ]\n"
+            + "}";
+    TableUpdatesRequest renameTableRequest =
+        JsonUtils.objectMapper().readValue(renameTableJsonString, TableUpdatesRequest.class);
+    Assertions.assertEquals(1, renameTableRequest.getUpdates().size());
+    TableUpdateRequest renameTable = renameTableRequest.getUpdates().get(0);
+    Assertions.assertInstanceOf(TableUpdateRequest.RenameTableRequest.class, renameTable);
+    Assertions.assertEquals(
+        "newTable", ((TableUpdateRequest.RenameTableRequest) renameTable).getNewName());
+    Assertions.assertNull(((TableUpdateRequest.RenameTableRequest) renameTable).getNewSchemaName());
 
     // test validate blank property value
     TableUpdateRequest.SetTablePropertyRequest setTablePropertyRequest =
@@ -264,11 +285,11 @@ public class TestTableUpdatesRequest {
     TableUpdateRequest tableUpdateRequest =
         new TableUpdateRequest.AddTableIndexRequest(
             Index.IndexType.PRIMARY_KEY,
-            Indexes.DEFAULT_MYSQL_PRIMARY_KEY_NAME,
+            Indexes.DEFAULT_PRIMARY_KEY_NAME,
             new String[][] {{"column1"}});
     String jsonString = JsonUtils.objectMapper().writeValueAsString(tableUpdateRequest);
     String expected =
-        "{\"@type\":\"addTableIndex\",\"index\":{\"indexType\":\"PRIMARY_KEY\",\"name\":\"PRIMARY\",\"fieldNames\":[[\"column1\"]]}}";
+        "{\"@type\":\"addTableIndex\",\"index\":{\"indexType\":\"PRIMARY_KEY\",\"name\":\"PRIMARY\",\"fieldNames\":[[\"column1\"]], \"properties\":{}}}";
     Assertions.assertEquals(
         JsonUtils.objectMapper().readTree(expected), JsonUtils.objectMapper().readTree(jsonString));
 
@@ -277,7 +298,7 @@ public class TestTableUpdatesRequest {
             Index.IndexType.UNIQUE_KEY, "uk_2", new String[][] {{"column2"}});
     jsonString = JsonUtils.objectMapper().writeValueAsString(tableUpdateRequest);
     expected =
-        "{\"@type\":\"addTableIndex\",\"index\":{\"indexType\":\"UNIQUE_KEY\",\"name\":\"uk_2\",\"fieldNames\":[[\"column2\"]]}}";
+        "{\"@type\":\"addTableIndex\",\"index\":{\"indexType\":\"UNIQUE_KEY\",\"name\":\"uk_2\",\"fieldNames\":[[\"column2\"]], \"properties\":{}}}";
     Assertions.assertEquals(
         JsonUtils.objectMapper().readTree(expected), JsonUtils.objectMapper().readTree(jsonString));
 
@@ -288,5 +309,55 @@ public class TestTableUpdatesRequest {
     expected = "{\"@type\":\"deleteTableIndex\",\"name\":\"uk_2\",\"ifExists\":true}";
     Assertions.assertEquals(
         JsonUtils.objectMapper().readTree(expected), JsonUtils.objectMapper().readTree(jsonString));
+
+    deleteTableIndexRequest =
+        JsonUtils.objectMapper()
+            .readValue(
+                "{\"@type\":\"deleteTableIndex\",\"name\":\"uk_3\"}",
+                TableUpdateRequest.DeleteTableIndexRequest.class);
+    DeleteIndex deleteIndex = (DeleteIndex) deleteTableIndexRequest.tableChange();
+    Assertions.assertEquals("uk_3", deleteIndex.getName());
+    Assertions.assertFalse(deleteIndex.isIfExists());
+  }
+
+  @Test
+  public void testValidateEmptyUpdates() {
+    TableUpdatesRequest request = new TableUpdatesRequest(ImmutableList.of());
+    Throwable exception =
+        Assertions.assertThrows(IllegalArgumentException.class, request::validate);
+    Assertions.assertEquals("updates must not be empty", exception.getMessage());
+  }
+
+  @Test
+  public void testUpdateColumnCommentWithEmptyString() {
+    TableUpdateRequest.UpdateTableColumnCommentRequest request =
+        new TableUpdateRequest.UpdateTableColumnCommentRequest(new String[] {"column1"}, "");
+
+    request.validate();
+
+    Assertions.assertEquals("", request.getNewComment());
+    Assertions.assertArrayEquals(new String[] {"column1"}, request.getFieldName());
+  }
+
+  @Test
+  public void testUpdateColumnCommentWithNull() {
+    TableUpdateRequest.UpdateTableColumnCommentRequest request =
+        new TableUpdateRequest.UpdateTableColumnCommentRequest(new String[] {"column1"}, null);
+
+    request.validate();
+
+    Assertions.assertNull(request.getNewComment());
+    Assertions.assertArrayEquals(new String[] {"column1"}, request.getFieldName());
+  }
+
+  @Test
+  public void testUpdateColumnCommentWithValidValue() {
+    TableUpdateRequest.UpdateTableColumnCommentRequest request =
+        new TableUpdateRequest.UpdateTableColumnCommentRequest(
+            new String[] {"column1"}, "This is a valid comment");
+
+    request.validate();
+
+    Assertions.assertEquals("This is a valid comment", request.getNewComment());
   }
 }

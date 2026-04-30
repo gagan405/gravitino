@@ -23,12 +23,22 @@ import static org.apache.gravitino.file.Fileset.LOCATION_NAME_UNKNOWN;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.Map;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.Field;
+import org.apache.gravitino.Namespace;
 import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.SecurableObjects;
 import org.apache.gravitino.file.Fileset;
+import org.apache.gravitino.rel.expressions.NamedReference;
+import org.apache.gravitino.rel.expressions.distributions.Distribution;
+import org.apache.gravitino.rel.expressions.distributions.Distributions;
+import org.apache.gravitino.rel.expressions.sorts.SortDirection;
+import org.apache.gravitino.rel.expressions.sorts.SortOrder;
+import org.apache.gravitino.rel.expressions.sorts.SortOrders;
+import org.apache.gravitino.rel.indexes.Index;
+import org.apache.gravitino.rel.indexes.Indexes;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -150,13 +160,35 @@ public class TestEntity {
 
   @Test
   public void testTable() {
+    String comment = "test table comment";
+    Map<String, String> tableProperties = ImmutableMap.of("tableKey1", "tableValue1");
+    SortOrder[] sortOrders =
+        new SortOrder[] {SortOrders.of(NamedReference.field("col1"), SortDirection.ASCENDING)};
+    Index[] indexes =
+        new Index[] {Indexes.of(Index.IndexType.BTREE, "idx1", new String[][] {{"col1"}})};
+    Distribution distribution = Distributions.hash(4, NamedReference.field("col1"));
+
     TableEntity testTable =
-        TableEntity.builder().withId(tableId).withName(tableName).withAuditInfo(auditInfo).build();
+        TableEntity.builder()
+            .withId(tableId)
+            .withName(tableName)
+            .withAuditInfo(auditInfo)
+            .withSortOrders(sortOrders)
+            .withProperties(tableProperties)
+            .withComment(comment)
+            .withIndexes(indexes)
+            .withDistribution(distribution)
+            .build();
 
     Map<Field, Object> fields = testTable.fields();
     Assertions.assertEquals(tableId, fields.get(TableEntity.ID));
     Assertions.assertEquals(tableName, fields.get(TableEntity.NAME));
     Assertions.assertEquals(auditInfo, fields.get(TableEntity.AUDIT_INFO));
+    Assertions.assertEquals(tableProperties, fields.get(TableEntity.PROPERTIES));
+    Assertions.assertEquals(comment, fields.get(TableEntity.COMMENT));
+    Assertions.assertEquals(sortOrders, fields.get(TableEntity.SORT_ORDERS));
+    Assertions.assertEquals(indexes, fields.get(TableEntity.INDEXES));
+    Assertions.assertEquals(distribution, fields.get(TableEntity.DISTRIBUTION));
   }
 
   @Test
@@ -338,5 +370,56 @@ public class TestEntity {
         TagEntity.builder().withId(1L).withName("tag2").withAuditInfo(auditInfo).build();
     Assertions.assertNull(tag2.comment());
     Assertions.assertNull(tag2.properties());
+  }
+
+  @Test
+  public void testHashCodeIncludesNamespace() {
+    AuditInfo audit = AuditInfo.builder().withCreator("test").withCreateTime(Instant.now()).build();
+
+    TableEntity table1 =
+        TableEntity.builder()
+            .withId(1L)
+            .withName("t")
+            .withNamespace(Namespace.of("catalog", "schema1"))
+            .withColumns(Collections.emptyList())
+            .withAuditInfo(audit)
+            .build();
+
+    TableEntity table2 =
+        TableEntity.builder()
+            .withId(1L)
+            .withName("t")
+            .withNamespace(Namespace.of("catalog", "schema2"))
+            .withColumns(Collections.emptyList())
+            .withAuditInfo(audit)
+            .build();
+
+    Assertions.assertNotEquals(
+        table1.hashCode(), table2.hashCode(), "hashCode should include namespace");
+  }
+
+  @Test
+  public void testHashCodeWithDifferentNamespaceHavingSameValues() {
+    AuditInfo audit = AuditInfo.builder().withCreator("test").withCreateTime(Instant.now()).build();
+
+    TableEntity table1 =
+        TableEntity.builder()
+            .withId(2L)
+            .withName("t")
+            .withNamespace(Namespace.of("catalog", "schema1"))
+            .withColumns(Collections.emptyList())
+            .withAuditInfo(audit)
+            .build();
+
+    TableEntity table2 =
+        TableEntity.builder()
+            .withId(2L)
+            .withName("t")
+            .withNamespace(Namespace.of("catalog", "schema1"))
+            .withColumns(Collections.emptyList())
+            .withAuditInfo(audit)
+            .build();
+
+    Assertions.assertEquals(table1.hashCode(), table2.hashCode(), "hashCode should be the same");
   }
 }

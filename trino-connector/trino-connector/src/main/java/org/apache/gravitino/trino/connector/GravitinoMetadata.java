@@ -23,7 +23,6 @@ import static org.apache.gravitino.trino.connector.GravitinoErrorCode.GRAVITINO_
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import io.airlift.slice.Slice;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
@@ -32,9 +31,10 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorInsertTableHandle;
 import io.trino.spi.connector.ConnectorMetadata;
-import io.trino.spi.connector.ConnectorOutputMetadata;
+import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
@@ -45,41 +45,63 @@ import io.trino.spi.connector.JoinType;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.RetryMode;
+import io.trino.spi.connector.RowChangeParadigm;
 import io.trino.spi.connector.SaveMode;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SortItem;
+import io.trino.spi.connector.SystemTable;
 import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.function.LanguageFunction;
+import io.trino.spi.function.SchemaFunctionName;
 import io.trino.spi.security.TrinoPrincipal;
-import io.trino.spi.statistics.ComputedStatistics;
+import io.trino.spi.statistics.ColumnStatistics;
 import io.trino.spi.statistics.TableStatistics;
 import io.trino.spi.type.Type;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.exceptions.NoSuchFunctionException;
+import org.apache.gravitino.function.Function;
+import org.apache.gravitino.function.FunctionDefinition;
+import org.apache.gravitino.function.FunctionImpl;
+import org.apache.gravitino.function.FunctionParam;
+import org.apache.gravitino.function.SQLImpl;
 import org.apache.gravitino.trino.connector.catalog.CatalogConnectorMetadata;
 import org.apache.gravitino.trino.connector.catalog.CatalogConnectorMetadataAdapter;
-import org.apache.gravitino.trino.connector.metadata.GravitinoColumn;
 import org.apache.gravitino.trino.connector.metadata.GravitinoSchema;
 import org.apache.gravitino.trino.connector.metadata.GravitinoTable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The GravitinoMetadata class provides operations for Apache Gravitino metadata on the Gravitino
  * server. It also transforms the different metadata formats between Trino and Gravitino.
  * Additionally, it wraps the internal connector metadata for accessing data.
  */
-public class GravitinoMetadata implements ConnectorMetadata {
+public abstract class GravitinoMetadata implements ConnectorMetadata {
+
+  private static final Logger LOG = LoggerFactory.getLogger(GravitinoMetadata.class);
+
+  // The column handle name that will generate row IDs for the merge operation.
+  public static final String MERGE_ROW_ID = "$row_id";
+
   // Handling metadata operations on gravitino server
-  private final CatalogConnectorMetadata catalogConnectorMetadata;
+  protected final CatalogConnectorMetadata catalogConnectorMetadata;
 
   // Transform different metadata format
-  private final CatalogConnectorMetadataAdapter metadataAdapter;
+  protected final CatalogConnectorMetadataAdapter metadataAdapter;
 
-  private final ConnectorMetadata internalMetadata;
+  protected final ConnectorMetadata internalMetadata;
 
   /**
    * Constructs a new GravitinoMetadata instance.
@@ -139,6 +161,13 @@ public class GravitinoMetadata implements ConnectorMetadata {
         catalogConnectorMetadata.getTable(
             gravitinoTableHandle.getSchemaName(), gravitinoTableHandle.getTableName());
     return metadataAdapter.getTableMetadata(table);
+    // TODO Add support for retrieving hidden columns from the table; they are used for query
+    // optimization.
+  }
+
+  @Override
+  public Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName) {
+    return internalMetadata.getSystemTable(session, tableName);
   }
 
   @Override
@@ -237,16 +266,6 @@ public class GravitinoMetadata implements ConnectorMetadata {
   }
 
   @Override
-  public Optional<ConnectorOutputMetadata> finishInsert(
-      ConnectorSession session,
-      ConnectorInsertTableHandle insertHandle,
-      Collection<Slice> fragments,
-      Collection<ComputedStatistics> computedStatistics) {
-    return internalMetadata.finishInsert(
-        session, GravitinoHandle.unWrap(insertHandle), fragments, computedStatistics);
-  }
-
-  @Override
   public void renameSchema(ConnectorSession session, String source, String target) {
     catalogConnectorMetadata.renameSchema(source, target);
   }
@@ -274,13 +293,6 @@ public class GravitinoMetadata implements ConnectorMetadata {
             .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().get()));
     Map<String, String> allProps = metadataAdapter.toGravitinoTableProperties(resultMap);
     catalogConnectorMetadata.setTableProperties(getTableName(tableHandle), allProps);
-  }
-
-  @Override
-  public void addColumn(
-      ConnectorSession session, ConnectorTableHandle tableHandle, ColumnMetadata column) {
-    GravitinoColumn gravitinoColumn = metadataAdapter.createColumn(column);
-    catalogConnectorMetadata.addColumn(getTableName(tableHandle), gravitinoColumn);
   }
 
   @Override
@@ -317,7 +329,6 @@ public class GravitinoMetadata implements ConnectorMetadata {
       ColumnHandle column,
       Optional<String> comment) {
     String columnName = getColumnName(column);
-
     String commentString = "";
     if (comment.isPresent() && !StringUtils.isBlank(comment.get())) {
       commentString = comment.get();
@@ -433,7 +444,10 @@ public class GravitinoMetadata implements ConnectorMetadata {
   @Override
   public ColumnHandle getMergeRowIdColumnHandle(
       ConnectorSession session, ConnectorTableHandle tableHandle) {
-    return ConnectorMetadata.super.getMergeRowIdColumnHandle(session, tableHandle);
+    ColumnHandle mergeRowIdColumnHandle =
+        internalMetadata.getMergeRowIdColumnHandle(session, GravitinoHandle.unWrap(tableHandle));
+
+    return new GravitinoColumnHandle(MERGE_ROW_ID, mergeRowIdColumnHandle);
   }
 
   @Override
@@ -572,10 +586,96 @@ public class GravitinoMetadata implements ConnectorMetadata {
   @Override
   public TableStatistics getTableStatistics(
       ConnectorSession session, ConnectorTableHandle tableHandle) {
-    return internalMetadata.getTableStatistics(session, GravitinoHandle.unWrap(tableHandle));
+    TableStatistics originTableStatistics =
+        internalMetadata.getTableStatistics(session, GravitinoHandle.unWrap(tableHandle));
+    Map<ColumnHandle, ColumnStatistics> columnStatistics =
+        originTableStatistics.getColumnStatistics().entrySet().stream()
+            .collect(
+                Collectors.toMap(
+                    entry ->
+                        new GravitinoColumnHandle(
+                            getColumnName(
+                                session, GravitinoHandle.unWrap(tableHandle), entry.getKey()),
+                            entry.getKey()),
+                    entry -> entry.getValue()));
+
+    return new TableStatistics(originTableStatistics.getRowCount(), columnStatistics);
   }
 
-  private SchemaTableName getTableName(ConnectorTableHandle tableHandle) {
+  @Override
+  public Optional<ConnectorPartitioningHandle> getUpdateLayout(
+      ConnectorSession session, ConnectorTableHandle tableHandle) {
+    Optional<ConnectorPartitioningHandle> updateLayout =
+        internalMetadata.getUpdateLayout(session, GravitinoHandle.unWrap(tableHandle));
+    return updateLayout.map(GravitinoPartitioningHandle::new);
+  }
+
+  @Override
+  public Optional<ConnectorTableHandle> applyUpdate(
+      ConnectorSession session,
+      ConnectorTableHandle tableHandle,
+      Map<ColumnHandle, Constant> assignments) {
+    return internalMetadata
+        .applyUpdate(
+            session,
+            GravitinoHandle.unWrap(tableHandle),
+            assignments.entrySet().stream()
+                .collect(
+                    Collectors.toMap(
+                        entry -> GravitinoHandle.unWrap(entry.getKey()), Map.Entry::getValue)))
+        .map(
+            result ->
+                new GravitinoTableHandle(
+                    getTableName(tableHandle).getSchemaName(),
+                    getTableName(tableHandle).getTableName(),
+                    result));
+  }
+
+  @Override
+  public RowChangeParadigm getRowChangeParadigm(
+      ConnectorSession session, ConnectorTableHandle tableHandle) {
+    return internalMetadata.getRowChangeParadigm(session, GravitinoHandle.unWrap(tableHandle));
+  }
+
+  @Override
+  public OptionalLong executeUpdate(ConnectorSession session, ConnectorTableHandle tableHandle) {
+    return internalMetadata.executeUpdate(session, GravitinoHandle.unWrap(tableHandle));
+  }
+
+  @Override
+  public Optional<ConnectorTableHandle> applyDelete(
+      ConnectorSession session, ConnectorTableHandle tableHandle) {
+    return internalMetadata
+        .applyDelete(session, GravitinoHandle.unWrap(tableHandle))
+        .map(
+            result ->
+                new GravitinoTableHandle(
+                    getTableName(tableHandle).getSchemaName(),
+                    getTableName(tableHandle).getTableName(),
+                    result));
+  }
+
+  @Override
+  public OptionalLong executeDelete(ConnectorSession session, ConnectorTableHandle tableHandle) {
+    return internalMetadata.executeDelete(session, GravitinoHandle.unWrap(tableHandle));
+  }
+
+  @Override
+  public Optional<ConnectorTableLayout> getInsertLayout(
+      ConnectorSession session, ConnectorTableHandle tableHandle) {
+    return internalMetadata
+        .getInsertLayout(session, GravitinoHandle.unWrap(tableHandle))
+        .map(
+            result ->
+                result.getPartitioning().isPresent()
+                    ? new ConnectorTableLayout(
+                        new GravitinoPartitioningHandle(result.getPartitioning().get()),
+                        result.getPartitionColumns(),
+                        result.supportsMultipleWritersPerPartition())
+                    : new ConnectorTableLayout(result.getPartitionColumns()));
+  }
+
+  protected SchemaTableName getTableName(ConnectorTableHandle tableHandle) {
     return ((GravitinoTableHandle) tableHandle).toSchemaTableName();
   }
 
@@ -593,5 +693,83 @@ public class GravitinoMetadata implements ConnectorMetadata {
           String.format("Column %s does not exist in the internal connector", columnHandle));
     }
     return internalMetadataColumnMetadata.getName();
+  }
+
+  @Override
+  public Collection<LanguageFunction> listLanguageFunctions(
+      ConnectorSession session, String schemaName) {
+    if (!catalogConnectorMetadata.supportsFunctions()) {
+      return List.of();
+    }
+    return Arrays.stream(catalogConnectorMetadata.listFunctionInfos(schemaName))
+        .flatMap(function -> toLanguageFunctions(function).stream())
+        .toList();
+  }
+
+  @Override
+  public Collection<LanguageFunction> getLanguageFunctions(
+      ConnectorSession session, SchemaFunctionName name) {
+    if (!catalogConnectorMetadata.supportsFunctions()) {
+      return List.of();
+    }
+    try {
+      Function function =
+          catalogConnectorMetadata.getFunction(name.getSchemaName(), name.getFunctionName());
+      if (function == null) {
+        return List.of();
+      }
+      return toLanguageFunctions(function);
+    } catch (NoSuchFunctionException e) {
+      LOG.debug("Function {} not found in schema {}", name.getFunctionName(), name.getSchemaName());
+      return List.of();
+    }
+  }
+
+  /**
+   * Converts a Gravitino function to a collection of Trino LanguageFunction instances. Only SQL
+   * implementations with TRINO runtime are included. Each definition with a Trino SQL
+   * implementation produces one LanguageFunction. The signature token is generated from the
+   * function name and parameter types.
+   */
+  private Collection<LanguageFunction> toLanguageFunctions(Function function) {
+    List<LanguageFunction> result = new ArrayList<>();
+    for (FunctionDefinition definition : function.definitions()) {
+      for (FunctionImpl impl : definition.impls()) {
+        if (!isTrinoSqlImplementation(impl)) {
+          continue;
+        }
+        String sql = ((SQLImpl) impl).sql();
+        try {
+          String signatureToken = buildSignatureToken(function.name(), definition.parameters());
+          result.add(new LanguageFunction(signatureToken, sql, List.of(), Optional.empty()));
+        } catch (TrinoException e) {
+          LOG.warn("Failed to build signature token for function {}", function.name(), e);
+        }
+      }
+    }
+    return result;
+  }
+
+  private boolean isTrinoSqlImplementation(FunctionImpl impl) {
+    return FunctionImpl.RuntimeType.TRINO.equals(impl.runtime())
+        && FunctionImpl.Language.SQL.equals(impl.language());
+  }
+
+  /**
+   * Builds a signature token from function name and parameters. The token uses Trino type names
+   * (e.g., varchar instead of string) and is lowercase as required by Trino's LanguageFunction.
+   */
+  private String buildSignatureToken(String functionName, FunctionParam[] params) {
+    StringBuilder sb = new StringBuilder(functionName.toLowerCase(Locale.ENGLISH));
+    sb.append("(");
+    for (int i = 0; i < params.length; i++) {
+      if (i > 0) {
+        sb.append(",");
+      }
+      Type trinoType = metadataAdapter.getDataTypeTransformer().getTrinoType(params[i].dataType());
+      sb.append(trinoType.getDisplayName().toLowerCase(Locale.ENGLISH));
+    }
+    sb.append(")");
+    return sb.toString();
   }
 }

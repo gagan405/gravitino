@@ -47,7 +47,7 @@ public class GroupMetaBaseSQLProvider {
         + " AND gt.deleted_at = 0 AND mt.deleted_at = 0";
   }
 
-  public String listExtendedGroupPOsByMetalakeId(Long metalakeId) {
+  public String listExtendedGroupPOsByMetalakeId(@Param("metalakeId") Long metalakeId) {
     return "SELECT gt.group_id as groupId, gt.group_name as groupName,"
         + " gt.metalake_id as metalakeId,"
         + " gt.audit_info as auditInfo,"
@@ -67,7 +67,7 @@ public class GroupMetaBaseSQLProvider {
         + ROLE_TABLE_NAME
         + " WHERE deleted_at = 0)"
         + " AS rot ON rot.role_id = rt.role_id"
-        + " WHERE "
+        + " WHERE"
         + " gt.deleted_at = 0 AND"
         + " gt.metalake_id = #{metalakeId}"
         + " GROUP BY gt.group_id";
@@ -89,10 +89,10 @@ public class GroupMetaBaseSQLProvider {
   public String insertGroupMeta(@Param("groupMeta") GroupPO groupPO) {
     return "INSERT INTO "
         + GROUP_TABLE_NAME
-        + "(group_id, group_name,"
+        + " (group_id, group_name,"
         + " metalake_id, audit_info,"
         + " current_version, last_version, deleted_at)"
-        + " VALUES("
+        + " VALUES ("
         + " #{groupMeta.groupId},"
         + " #{groupMeta.groupName},"
         + " #{groupMeta.metalakeId},"
@@ -106,10 +106,10 @@ public class GroupMetaBaseSQLProvider {
   public String insertGroupMetaOnDuplicateKeyUpdate(@Param("groupMeta") GroupPO groupPO) {
     return "INSERT INTO "
         + GROUP_TABLE_NAME
-        + "(group_id, group_name,"
-        + "metalake_id, audit_info,"
+        + " (group_id, group_name,"
+        + " metalake_id, audit_info,"
         + " current_version, last_version, deleted_at)"
-        + " VALUES("
+        + " VALUES ("
         + " #{groupMeta.groupId},"
         + " #{groupMeta.groupName},"
         + " #{groupMeta.metalakeId},"

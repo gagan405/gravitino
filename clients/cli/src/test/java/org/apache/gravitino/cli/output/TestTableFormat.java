@@ -524,7 +524,7 @@ public class TestTableFormat {
             + "| column2 | string  | default value       |               | true     | This is a string column |\n"
             + "| column2 | string  | ''                  |               | true     | This is a string column |\n"
             + "| column2 | string  | current_timestamp() |               | true     | This is a string column |\n"
-            + "| column2 | string  | date([b])           |               | true     | This is a string column |\n"
+            + "| column2 | string  | date(b)             |               | true     | This is a string column |\n"
             + "+---------+---------+---------------------+---------------+----------+-------------------------+",
         output);
   }
@@ -949,5 +949,23 @@ public class TestTableFormat {
             + "+--------+--------------+";
 
     Assertions.assertEquals(expected.trim(), outputString.trim());
+  }
+
+  @Test
+  void testUserDetailsWithNullRoles() {
+    CommandContext mockContext = TestCliUtil.getMockContext();
+    User mockUser = mock(User.class);
+    when(mockUser.name()).thenReturn("user1");
+    when(mockUser.roles()).thenReturn(null);
+
+    TableFormat.output(mockUser, mockContext);
+    String output = new String(outContent.toByteArray(), StandardCharsets.UTF_8).trim();
+    Assertions.assertEquals(
+        "+-------+-------+\n"
+            + "| Name  | Roles |\n"
+            + "+-------+-------+\n"
+            + "| user1 |       |\n"
+            + "+-------+-------+",
+        output);
   }
 }

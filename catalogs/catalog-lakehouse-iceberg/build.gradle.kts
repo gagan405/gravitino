@@ -31,21 +31,22 @@ val icebergVersion: String = libs.versions.iceberg.get()
 val scalaCollectionCompatVersion: String = libs.versions.scala.collection.compat.get()
 
 dependencies {
-  implementation(project(":api")) {
-    exclude("*")
-  }
-  implementation(project(":catalogs:catalog-common"))
-  implementation(project(":common")) {
-    exclude("*")
-  }
-  implementation(project(":core")) {
-    exclude("*")
-  }
-  implementation(project(":iceberg:iceberg-common"))
-  implementation(libs.bundles.iceberg)
+  compileOnly(project(":api"))
+  compileOnly(project(":common"))
+  compileOnly(project(":core"))
 
+  compileOnly(libs.lombok)
+
+  implementation(project(":catalogs:catalog-common"))
+  implementation(project(":iceberg:iceberg-common"))
+
+  implementation(libs.asm)
+  implementation(libs.bundles.iceberg)
   implementation(libs.bundles.log4j)
-  implementation(libs.cglib)
+  implementation(libs.cglib) {
+    // The version of build-in asm is 7.1, which is not compatible with Java 17 well
+    exclude("org.ow2.asm")
+  }
   implementation(libs.commons.collections4)
   implementation(libs.commons.io)
   implementation(libs.commons.lang3)
@@ -53,15 +54,15 @@ dependencies {
 
   annotationProcessor(libs.lombok)
 
-  compileOnly(libs.lombok)
-
+  testImplementation(project(":api"))
   testImplementation(project(":catalogs:catalog-jdbc-common", "testArtifacts"))
   testImplementation(project(":clients:client-java"))
+  testImplementation(project(":common"))
+  testImplementation(project(":core"))
   testImplementation(project(":integration-test-common", "testArtifacts"))
   testImplementation(project(":server"))
   testImplementation(project(":server-common"))
 
-  testImplementation("org.scala-lang.modules:scala-collection-compat_$scalaVersion:$scalaCollectionCompatVersion")
   testImplementation("org.apache.iceberg:iceberg-spark-runtime-${sparkMajorVersion}_$scalaVersion:$icebergVersion")
   testImplementation("org.apache.spark:spark-hive_$scalaVersion:$sparkVersion") {
     exclude("org.apache.hive")
@@ -73,7 +74,12 @@ dependencies {
     exclude("io.dropwizard.metrics")
     exclude("org.rocksdb")
   }
-
+  testImplementation("org.scala-lang.modules:scala-collection-compat_$scalaVersion:$scalaCollectionCompatVersion")
+  testImplementation(libs.awaitility)
+  // Add Hadoop 3.3+ dependencies since Spark's Hadoop is excluded
+  // Required for Iceberg 1.10+ which uses newer Hadoop APIs like FileSystem.openFile()
+  testImplementation(libs.hadoop3.client.api)
+  testImplementation(libs.hadoop3.client.runtime)
   testImplementation(libs.junit.jupiter.api)
   testImplementation(libs.junit.jupiter.params)
   testImplementation(libs.mockito.core)
@@ -89,7 +95,7 @@ dependencies {
 }
 
 tasks {
-  val runtimeJars by registering(Copy::class) {
+  register("runtimeJars", Copy::class) {
     from(configurations.runtimeClasspath)
     into("build/libs")
   }
@@ -104,6 +110,7 @@ tasks {
       exclude("guava-*.jar")
       exclude("log4j-*.jar")
       exclude("slf4j-*.jar")
+      exclude("error_prone_annotations-*.jar")
     }
     into("$rootDir/distribution/package/catalogs/lakehouse-iceberg/libs")
   }
@@ -143,6 +150,8 @@ tasks.test {
     exclude("**/integration/test/**")
   } else {
     dependsOn(tasks.jar)
+    dependsOn(":iceberg:iceberg-rest-server:jar")
+    dependsOn(":lance:lance-rest-server:jar")
   }
 }
 

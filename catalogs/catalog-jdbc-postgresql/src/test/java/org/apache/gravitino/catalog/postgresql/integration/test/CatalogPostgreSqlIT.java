@@ -27,6 +27,9 @@ import com.google.common.collect.Sets;
 import java.io.IOException;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
@@ -758,7 +761,8 @@ public class CatalogPostgreSqlIT extends BaseIT {
           Indexes.unique("u3_key", new String[][] {{"col_5"}, {"col_4"}}),
           Indexes.unique("u4_key", new String[][] {{"col_2"}, {"col_4"}, {"col_3"}}),
           Indexes.unique("u5_key", new String[][] {{"col_5"}, {"col_3"}, {"col_2"}}),
-          Indexes.unique("u6_key", new String[][] {{"col_1"}, {"col_3"}, {"col_2"}, {"col_4"}}),
+          Indexes.unique(
+              "u6_key", new String[][] {{"col_1"}, {"col_3"}, {"col_2"}, {"col_4"}}, Map.of()),
         };
 
     NameIdentifier tableIdentifier = NameIdentifier.of(schemaName, tableName);
@@ -819,7 +823,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
             "Index does not support complex fields in PostgreSQL"));
 
     Index[] primaryIndex2 =
-        new Index[] {Indexes.unique("u1_key", new String[][] {{"col_2", "col_3"}})};
+        new Index[] {Indexes.unique("u1_key", new String[][] {{"col_2", "col_3"}}, Map.of())};
     illegalArgumentException =
         assertThrows(
             IllegalArgumentException.class,
@@ -871,8 +875,8 @@ public class CatalogPostgreSqlIT extends BaseIT {
         Distributions.NONE,
         new SortOrder[0],
         new Index[] {
-          Indexes.unique("u4_key_2", new String[][] {{"col_2"}, {"col_3"}, {"col_4"}}),
-          Indexes.unique("u5_key_3", new String[][] {{"col_2"}, {"col_3"}, {"col_4"}}),
+          Indexes.unique("u4_key_2", new String[][] {{"col_2"}, {"col_3"}, {"col_4"}}, Map.of()),
+          Indexes.unique("u5_key_3", new String[][] {{"col_2"}, {"col_3"}, {"col_4"}}, Map.of()),
         });
     table = tableCatalog.loadTable(tableIdent);
 
@@ -917,8 +921,32 @@ public class CatalogPostgreSqlIT extends BaseIT {
             true,
             false,
             Literals.integerLiteral(1000));
+    Column col7 =
+        Column.of(
+            "col_7",
+            Types.DateType.get(),
+            "col_7_comment",
+            false,
+            false,
+            Literals.dateLiteral("2024-01-01"));
+    Column col8 =
+        Column.of(
+            "col_8",
+            Types.TimestampType.withoutTimeZone(),
+            "col_8_comment",
+            false,
+            false,
+            Literals.timestampLiteral("2024-01-01T01:01:01"));
+    Column col9 =
+        Column.of(
+            "col_9",
+            Types.TimeType.get(),
+            "col_9_comment",
+            false,
+            false,
+            Literals.timeLiteral("01:01:01"));
 
-    Column[] newColumns = new Column[] {col1, col2, col3, col4, col5, col6};
+    Column[] newColumns = new Column[] {col1, col2, col3, col4, col5, col6, col7, col8, col9};
 
     NameIdentifier tableIdent =
         NameIdentifier.of(schemaName, GravitinoITUtils.genRandomName("pg_it_table"));
@@ -934,6 +962,13 @@ public class CatalogPostgreSqlIT extends BaseIT {
     Assertions.assertEquals(
         Literals.varcharLiteral(255, "current_timestamp"), loadedTable.columns()[4].defaultValue());
     Assertions.assertEquals(Literals.integerLiteral(1000), loadedTable.columns()[5].defaultValue());
+    Assertions.assertEquals(
+        Literals.dateLiteral(LocalDate.of(2024, 1, 1)), loadedTable.columns()[6].defaultValue());
+    Assertions.assertEquals(
+        Literals.timestampLiteral(LocalDateTime.of(2024, 1, 1, 1, 1, 1)),
+        loadedTable.columns()[7].defaultValue());
+    Assertions.assertEquals(
+        Literals.timeLiteral(LocalTime.of(1, 1, 1)), loadedTable.columns()[8].defaultValue());
   }
 
   @Test
@@ -1001,11 +1036,17 @@ public class CatalogPostgreSqlIT extends BaseIT {
             + "    date_col_2 date,\n"
             + "    date_col_3 date default (current_date + interval '1 year'),\n"
             + "    date_col_4 date default current_date,\n"
-            // todo: uncomment when we support timestamp in PG catalog
-            // + "    timestamp_col_1 timestamp default '2012-12-31 11:30:45',\n"
-            + "    decimal_6_2_col_1 decimal(6, 2) default 1.2\n"
+            + "    date_col_5 date default '2012-12-31',\n"
+            + "    decimal_6_2_col_1 decimal(6, 2) default 1.2,\n"
+            + "    timestamp_col_1 timestamp default '2012-12-31 11:30:45',\n"
+            + "    time_col_1 time default '11:30:45',\n"
+            + "    uuid UUID NOT NULL,\n"
+            + "    character_col_1 CHARACTER VARYING(64) NOT NULL,\n"
+            + "    character_col_2 CHARACTER VARYING[],"
+            + "    character_col_3 CHARACTER(36) DEFAULT ''::bpchar,\n"
+            + "    character_col_4 CHARACTER VARYING[],\n"
+            + "    jsonb JSONB NOT NULL\n"
             + ");";
-    System.out.println(sql);
     postgreSqlService.executeQuery(sql);
     Table loadedTable =
         catalog.asTableCatalog().loadTable(NameIdentifier.of(schemaName, tableName));
@@ -1048,6 +1089,8 @@ public class CatalogPostgreSqlIT extends BaseIT {
           Assertions.assertEquals(UnparsedExpression.of("CURRENT_DATE"), column.defaultValue());
           break;
         case "date_col_2":
+        case "character_col_2":
+        case "character_col_4":
           Assertions.assertEquals(Literals.NULL, column.defaultValue());
           break;
         case "date_col_3":
@@ -1057,17 +1100,27 @@ public class CatalogPostgreSqlIT extends BaseIT {
         case "date_col_4":
           Assertions.assertEquals(UnparsedExpression.of("CURRENT_DATE"), column.defaultValue());
           break;
+        case "date_col_5":
+          Assertions.assertEquals(Literals.dateLiteral("2012-12-31"), column.defaultValue());
+          break;
         case "timestamp_col_1":
           Assertions.assertEquals(
               Literals.timestampLiteral("2012-12-31T11:30:45"), column.defaultValue());
           break;
-        case "timestamp_col_2":
-          Assertions.assertEquals(
-              Literals.timestampLiteral("1983-09-05T00:00:00"), column.defaultValue());
+        case "time_col_1":
+          Assertions.assertEquals(Literals.timeLiteral("11:30:45"), column.defaultValue());
           break;
         case "decimal_6_2_col_1":
           Assertions.assertEquals(
               Literals.decimalLiteral(Decimal.of("1.2", 6, 2)), column.defaultValue());
+          break;
+        case "uuid":
+        case "character_col_1":
+        case "jsonb":
+          Assertions.assertEquals(Column.DEFAULT_VALUE_NOT_SET, column.defaultValue());
+          break;
+        case "character_col_3":
+          Assertions.assertEquals(Literals.stringLiteral("''::bpchar"), column.defaultValue());
           break;
         default:
           Assertions.fail("Unexpected column name: " + column.name());
@@ -1085,7 +1138,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
     Column t1_col = Column.of(t1_name, Types.LongType.get(), "id", false, false, null);
     Column[] columns = {t1_col};
 
-    Index[] t1_indexes = {Indexes.unique("u1_key", new String[][] {{t1_name}})};
+    Index[] t1_indexes = {Indexes.unique("u1_key", new String[][] {{t1_name}}, Map.of())};
 
     NameIdentifier tableIdentifier = NameIdentifier.of(schemaName, t1_name);
     tableCatalog.createTable(
@@ -1100,7 +1153,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String t2_name = "t212";
     Column t2_col = Column.of(t2_name, Types.LongType.get(), "id", false, false, null);
-    Index[] t2_indexes = {Indexes.unique("u2_key", new String[][] {{t2_name}})};
+    Index[] t2_indexes = {Indexes.unique("u2_key", new String[][] {{t2_name}}, Map.of())};
     columns = new Column[] {t2_col};
     tableIdentifier = NameIdentifier.of(schemaName, t2_name);
     tableCatalog.createTable(
@@ -1115,7 +1168,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String t3_name = "t_12";
     Column t3_col = Column.of(t3_name, Types.LongType.get(), "id", false, false, null);
-    Index[] t3_indexes = {Indexes.unique("u3_key", new String[][] {{t3_name}})};
+    Index[] t3_indexes = {Indexes.unique("u3_key", new String[][] {{t3_name}}, Map.of())};
     columns = new Column[] {t3_col};
     tableIdentifier = NameIdentifier.of(schemaName, t3_name);
     tableCatalog.createTable(
@@ -1130,7 +1183,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String t4_name = "_1__";
     Column t4_col = Column.of(t4_name, Types.LongType.get(), "id", false, false, null);
-    Index[] t4_indexes = {Indexes.unique("u4_key", new String[][] {{t4_name}})};
+    Index[] t4_indexes = {Indexes.unique("u4_key", new String[][] {{t4_name}}, Map.of())};
     columns = new Column[] {t4_col};
     tableIdentifier = NameIdentifier.of(schemaName, t4_name);
     tableCatalog.createTable(
@@ -1197,7 +1250,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
     String t1_name = table_name + "`; DROP TABLE important_table; -- ";
     Column t1_col = Column.of(t1_name, Types.LongType.get(), "id", false, false, null);
     Column[] columns = {t1_col};
-    Index[] t1_indexes = {Indexes.unique("u1_key", new String[][] {{t1_name}})};
+    Index[] t1_indexes = {Indexes.unique("u1_key", new String[][] {{t1_name}}, Map.of())};
     NameIdentifier tableIdentifier =
         NameIdentifier.of(metalakeName, catalogName, schemaName, t1_name);
 
@@ -1222,7 +1275,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String t2_name = table_name + "`; SLEEP(10); -- ";
     Column t2_col = Column.of(t2_name, Types.LongType.get(), "id", false, false, null);
-    Index[] t2_indexes = {Indexes.unique("u2_key", new String[][] {{t2_name}})};
+    Index[] t2_indexes = {Indexes.unique("u2_key", new String[][] {{t2_name}}, Map.of())};
     Column[] columns2 = new Column[] {t2_col};
     NameIdentifier tableIdentifier2 =
         NameIdentifier.of(metalakeName, catalogName, schemaName, t2_name);
@@ -1249,7 +1302,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
     String t3_name =
         table_name + "`; UPDATE Users SET password = 'newpassword' WHERE username = 'admin'; -- ";
     Column t3_col = Column.of(t3_name, Types.LongType.get(), "id", false, false, null);
-    Index[] t3_indexes = {Indexes.unique("u3_key", new String[][] {{t3_name}})};
+    Index[] t3_indexes = {Indexes.unique("u3_key", new String[][] {{t3_name}}, Map.of())};
     Column[] columns3 = new Column[] {t3_col};
     NameIdentifier tableIdentifier3 =
         NameIdentifier.of(metalakeName, catalogName, schemaName, t3_name);
@@ -1275,7 +1328,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String invalidInput = StringUtils.repeat("a", 64);
     Column t4_col = Column.of(invalidInput, Types.LongType.get(), "id", false, false, null);
-    Index[] t4_indexes = {Indexes.unique("u4_key", new String[][] {{invalidInput}})};
+    Index[] t4_indexes = {Indexes.unique("u4_key", new String[][] {{invalidInput}}, Map.of())};
     Column[] columns4 = new Column[] {t4_col};
     NameIdentifier tableIdentifier4 =
         NameIdentifier.of(metalakeName, catalogName, schemaName, invalidInput);
@@ -1301,7 +1354,7 @@ public class CatalogPostgreSqlIT extends BaseIT {
 
     String invalidInput2 = RandomNameUtils.genRandomName("$test_db");
     Column t5_col = Column.of(invalidInput2, Types.LongType.get(), "id", false, false, null);
-    Index[] t5_indexes = {Indexes.unique("u5_key", new String[][] {{invalidInput2}})};
+    Index[] t5_indexes = {Indexes.unique("u5_key", new String[][] {{invalidInput2}}, Map.of())};
     Column[] columns5 = new Column[] {t5_col};
     NameIdentifier tableIdentifier5 =
         NameIdentifier.of(metalakeName, catalogName, schemaName, invalidInput2);
@@ -1510,7 +1563,8 @@ public class CatalogPostgreSqlIT extends BaseIT {
     Column col3 = Column.of("col_3", Types.VarCharType.of(255), "config", false, false, null);
     Column[] newColumns = new Column[] {col1, col2, col3};
 
-    Index[] indexes = new Index[] {Indexes.unique("u1_key", new String[][] {{"col_2"}, {"col_3"}})};
+    Index[] indexes =
+        new Index[] {Indexes.unique("u1_key", new String[][] {{"col_2"}, {"col_3"}}, Map.of())};
 
     String[] schemas = {"db_", "db_1", "db_2", "db12"};
     SupportsSchemas schemaSupport = catalog.asSchemas();

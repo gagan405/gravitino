@@ -22,6 +22,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.function.Function;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.gravitino.Config;
 import org.apache.gravitino.Entity;
 import org.apache.gravitino.EntityAlreadyExistsException;
@@ -30,11 +31,9 @@ import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.SupportsRelationOperations;
 import org.apache.gravitino.exceptions.NoSuchEntityException;
-import org.apache.gravitino.tag.SupportsTagOperations;
 
 /** Interface defining the operations for a Relation Backend. */
-public interface RelationalBackend
-    extends Closeable, SupportsTagOperations, SupportsRelationOperations {
+public interface RelationalBackend extends Closeable, SupportsRelationOperations {
 
   /**
    * Initializes the Relational Backend environment with the provided configuration.
@@ -115,6 +114,18 @@ public interface RelationalBackend
       throws IOException;
 
   /**
+   * Batch retrieves the entities associated with the identifiers and the entity type.
+   *
+   * @param <E> The type of the entity returned.
+   * @param identifiers The identifiers of the entities.
+   * @param entityType The type of the entity.
+   * @return The entities associated with the identifiers and the entity type, or null if the key
+   *     does not exist.
+   */
+  <E extends Entity & HasIdentifier> List<E> batchGet(
+      List<NameIdentifier> identifiers, Entity.EntityType entityType);
+
+  /**
    * Soft deletes the entity associated with the identifier and the entity type.
    *
    * @param ident The identifier of the entity.
@@ -125,6 +136,29 @@ public interface RelationalBackend
    */
   boolean delete(NameIdentifier ident, Entity.EntityType entityType, boolean cascade)
       throws IOException;
+
+  /**
+   * Deletes the entities in the specified namespace and entity type.
+   *
+   * @param entitiesToDelete The list of identifiers and their entity types to be deleted.
+   * @param cascade True, If you need to cascade delete entities, else false.
+   * @return The count of the deleted entities.
+   * @throws IOException If the store operation fails
+   */
+  int batchDelete(List<Pair<NameIdentifier, Entity.EntityType>> entitiesToDelete, boolean cascade)
+      throws IOException;
+
+  /**
+   * Stores a batch of entities, possibly overwriting existing entities if specified.
+   *
+   * @param entities The list of entities to be stored.
+   * @param overwritten If true, overwrites existing entities with the same identifier.
+   * @param <E> The type of the entities in the list.
+   * @throws IOException If the store operation fails
+   * @throws EntityAlreadyExistsException If an entity already exists and overwrite is false.
+   */
+  <E extends Entity & HasIdentifier> void batchPut(List<E> entities, boolean overwritten)
+      throws IOException, EntityAlreadyExistsException;
 
   /**
    * Permanently deletes the legacy data that has been marked as deleted before the given legacy

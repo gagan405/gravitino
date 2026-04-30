@@ -96,4 +96,22 @@ public class TagMetaSQLProviderFactory {
       @Param("legacyTimeline") Long legacyTimeline, @Param("limit") int limit) {
     return getProvider().deleteTagMetasByLegacyTimeline(legacyTimeline, limit);
   }
+
+  public static String selectTagMetaByMetalakeIdAndName(
+      @Param("metalakeId") Long metalakeId, @Param("name") String name) {
+    return getProvider().selectTagMetaByMetalakeIdAndName(metalakeId, name);
+  }
+
+  public static String selectTagByTagId(@Param("tagId") Long tagId) {
+    return getProvider().selectTagByTagId(tagId);
+  }
+
+  public static String listTagPOsByTagIds(@Param("tagIds") List<Long> tagIds) {
+    return getProvider().listTagPOsByTagIds(tagIds);
+  }
+
+  public static String batchSelectTagByIdentifier(
+      @Param("metalakeName") String metalakeName, @Param("tagNames") List<String> tagNames) {
+    return getProvider().batchSelectTagByIdentifier(metalakeName, tagNames);
+  }
 }

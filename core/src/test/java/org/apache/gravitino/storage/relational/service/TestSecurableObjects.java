@@ -21,94 +21,108 @@ package org.apache.gravitino.storage.relational.service;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import java.io.IOException;
-import java.time.Instant;
+import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Comparator;
 import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.authorization.AuthorizationUtils;
 import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.SecurableObject;
 import org.apache.gravitino.authorization.SecurableObjects;
-import org.apache.gravitino.meta.AuditInfo;
 import org.apache.gravitino.meta.BaseMetalake;
 import org.apache.gravitino.meta.CatalogEntity;
 import org.apache.gravitino.meta.FilesetEntity;
+import org.apache.gravitino.meta.FunctionEntity;
 import org.apache.gravitino.meta.ModelEntity;
 import org.apache.gravitino.meta.RoleEntity;
 import org.apache.gravitino.meta.SchemaEntity;
 import org.apache.gravitino.meta.TableEntity;
 import org.apache.gravitino.meta.TopicEntity;
+import org.apache.gravitino.meta.ViewEntity;
 import org.apache.gravitino.storage.RandomIdGenerator;
 import org.apache.gravitino.storage.relational.TestJDBCBackend;
+import org.apache.gravitino.storage.relational.session.SqlSessionFactoryHelper;
+import org.apache.ibatis.session.SqlSession;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestTemplate;
 
 public class TestSecurableObjects extends TestJDBCBackend {
-  RoleMetaService roleMetaService = RoleMetaService.getInstance();
+  private final RoleMetaService roleMetaService = RoleMetaService.getInstance();
 
-  @Test
+  @TestTemplate
   public void testAllTypeSecurableObjects() throws IOException {
     String metalakeName = "metalake";
-    AuditInfo auditInfo =
-        AuditInfo.builder().withCreator("creator").withCreateTime(Instant.now()).build();
-    BaseMetalake metalake =
-        createBaseMakeLake(RandomIdGenerator.INSTANCE.nextId(), metalakeName + "2", auditInfo);
-    backend.insert(metalake, false);
-
-    BaseMetalake metalake2 =
-        createBaseMakeLake(RandomIdGenerator.INSTANCE.nextId(), metalakeName, auditInfo);
-    backend.insert(metalake2, false);
+    BaseMetalake metalake = createAndInsertMakeLake(metalakeName);
 
     CatalogEntity catalog =
         createCatalog(
-            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", auditInfo);
+            RandomIdGenerator.INSTANCE.nextId(), Namespace.of(metalakeName), "catalog", AUDIT_INFO);
     backend.insert(catalog, false);
+
+    CatalogEntity catalog2 =
+        createCatalog(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake"),
+            metalake.name(),
+            AUDIT_INFO);
+    backend.insert(catalog2, false);
 
     SchemaEntity schema =
         createSchemaEntity(
             RandomIdGenerator.INSTANCE.nextId(),
-            Namespace.of("metalake", "catalog"),
+            Namespace.of(metalakeName, "catalog"),
             "schema",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(schema, false);
 
     FilesetEntity fileset =
         createFilesetEntity(
             RandomIdGenerator.INSTANCE.nextId(),
-            Namespace.of("metalake", "catalog", "schema"),
+            Namespace.of(metalakeName, "catalog", "schema"),
             "fileset",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(fileset, false);
 
     TableEntity table =
         createTableEntity(
             RandomIdGenerator.INSTANCE.nextId(),
-            Namespace.of("metalake", "catalog", "schema"),
+            Namespace.of(metalakeName, "catalog", "schema"),
             "table",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(table, false);
 
     TopicEntity topic =
         createTopicEntity(
             RandomIdGenerator.INSTANCE.nextId(),
-            Namespace.of("metalake", "catalog", "schema"),
+            Namespace.of(metalakeName, "catalog", "schema"),
             "topic",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(topic, false);
+
+    ViewEntity view =
+        createViewEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of(metalakeName, "catalog", "schema"),
+            "view");
+    backend.insert(view, false);
 
     SecurableObject metalakeObject =
         SecurableObjects.ofMetalake(
             metalake.name(), Lists.newArrayList(Privileges.UseCatalog.allow()));
 
-    SecurableObject metalakeObject2 =
-        SecurableObjects.ofMetalake(
-            metalake2.name(), Lists.newArrayList(Privileges.UseCatalog.allow()));
-
     SecurableObject catalogObject =
         SecurableObjects.ofCatalog(
             "catalog",
             Lists.newArrayList(Privileges.UseCatalog.allow(), Privileges.CreateSchema.deny()));
+
+    SecurableObject catalogObject2 =
+        SecurableObjects.ofCatalog(
+            metalake.name(), Lists.newArrayList(Privileges.UseCatalog.allow()));
 
     SecurableObject schemaObject =
         SecurableObjects.ofSchema(
@@ -126,15 +140,20 @@ public class TestSecurableObjects extends TestJDBCBackend {
         SecurableObjects.ofTopic(
             schemaObject, "topic", Lists.newArrayList(Privileges.ConsumeTopic.deny()));
 
+    SecurableObject viewObject =
+        SecurableObjects.ofView(
+            schemaObject, "view", Lists.newArrayList(Privileges.SelectTable.allow()));
+
     ArrayList<SecurableObject> securableObjects =
         Lists.newArrayList(
             metalakeObject,
-            metalakeObject2,
+            catalogObject2,
             catalogObject,
             schemaObject,
             tableObject,
             filesetObject,
-            topicObject);
+            topicObject,
+            viewObject);
     securableObjects.sort(Comparator.comparing(MetadataObject::fullName));
 
     RoleEntity role1 =
@@ -142,7 +161,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             AuthorizationUtils.ofRoleNamespace(metalakeName),
             "role1",
-            auditInfo,
+            AUDIT_INFO,
             securableObjects,
             ImmutableMap.of("k1", "v1"));
 
@@ -150,18 +169,16 @@ public class TestSecurableObjects extends TestJDBCBackend {
     Assertions.assertEquals(role1, roleMetaService.getRoleByIdentifier(role1.nameIdentifier()));
   }
 
-  @Test
+  @TestTemplate
   public void testDeleteMetadataObject() throws IOException {
     String metalakeName = "metalake";
-    AuditInfo auditInfo =
-        AuditInfo.builder().withCreator("creator").withCreateTime(Instant.now()).build();
     BaseMetalake metalake =
-        createBaseMakeLake(RandomIdGenerator.INSTANCE.nextId(), metalakeName, auditInfo);
+        createBaseMakeLake(RandomIdGenerator.INSTANCE.nextId(), metalakeName, AUDIT_INFO);
     backend.insert(metalake, false);
 
     CatalogEntity catalog =
         createCatalog(
-            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", auditInfo);
+            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", AUDIT_INFO);
     backend.insert(catalog, false);
 
     SchemaEntity schema =
@@ -169,7 +186,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog"),
             "schema",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(schema, false);
 
     FilesetEntity fileset =
@@ -177,21 +194,21 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "fileset",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(fileset, false);
     TableEntity table =
         createTableEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "table",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(table, false);
     TopicEntity topic =
         createTopicEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "topic",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(topic, false);
     ModelEntity model =
         createModelEntity(
@@ -201,8 +218,22 @@ public class TestSecurableObjects extends TestJDBCBackend {
             "comment",
             1,
             null,
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(model, false);
+
+    ViewEntity view =
+        createViewEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "view");
+    backend.insert(view, false);
+    FunctionEntity function =
+        createFunctionEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "function",
+            AUDIT_INFO);
+    backend.insert(function, false);
 
     SecurableObject catalogObject =
         SecurableObjects.ofCatalog(
@@ -224,50 +255,74 @@ public class TestSecurableObjects extends TestJDBCBackend {
     SecurableObject modelObject =
         SecurableObjects.ofModel(
             schemaObject, "model", Lists.newArrayList(Privileges.UseModel.deny()));
+    SecurableObject viewObject =
+        SecurableObjects.ofView(
+            schemaObject, "view", Lists.newArrayList(Privileges.SelectTable.allow()));
+    SecurableObject functionObject =
+        SecurableObjects.ofFunction(
+            schemaObject, "function", Lists.newArrayList(Privileges.ExecuteFunction.allow()));
 
     RoleEntity role1 =
         createRoleEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             AuthorizationUtils.ofRoleNamespace(metalakeName),
             "role1",
-            auditInfo,
+            AUDIT_INFO,
             Lists.newArrayList(
-                catalogObject, schemaObject, tableObject, filesetObject, topicObject, modelObject),
+                catalogObject,
+                schemaObject,
+                tableObject,
+                filesetObject,
+                topicObject,
+                modelObject,
+                viewObject,
+                functionObject),
             ImmutableMap.of("k1", "v1"));
 
     roleMetaService.insertRole(role1, false);
 
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
-    Assertions.assertEquals(6, countActiveObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countActiveObjectRel(role1.id()));
+
+    // Test to delete view
+    ViewMetaService.getInstance()
+        .deleteView(NameIdentifier.of("metalake", "catalog", "schema", "view"));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(7, countActiveObjectRel(role1.id()));
 
     // Test to delete model
     ModelMetaService.getInstance().deleteModel(model.nameIdentifier());
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
-    Assertions.assertEquals(5, countActiveObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(6, countActiveObjectRel(role1.id()));
 
     // Test to delete table
     TableMetaService.getInstance().deleteTable(table.nameIdentifier());
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
-    Assertions.assertEquals(4, countActiveObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(5, countActiveObjectRel(role1.id()));
 
     // Test to delete topic
     TopicMetaService.getInstance().deleteTopic(topic.nameIdentifier());
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
-    Assertions.assertEquals(3, countActiveObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(4, countActiveObjectRel(role1.id()));
 
     // Test to delete fileset
     FilesetMetaService.getInstance().deleteFileset(fileset.nameIdentifier());
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(3, countActiveObjectRel(role1.id()));
+
+    // Test to delete function
+    FunctionMetaService.getInstance().deleteFunction(function.nameIdentifier());
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
     Assertions.assertEquals(2, countActiveObjectRel(role1.id()));
 
     // Test to delete schema
     SchemaMetaService.getInstance().deleteSchema(schema.nameIdentifier(), false);
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
     Assertions.assertEquals(1, countActiveObjectRel(role1.id()));
 
     // Test to delete catalog
     CatalogMetaService.getInstance().deleteCatalog(catalog.nameIdentifier(), false);
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
     Assertions.assertEquals(0, countActiveObjectRel(role1.id()));
 
     roleMetaService.deleteRole(role1.nameIdentifier());
@@ -275,7 +330,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
     // Test to delete catalog with cascade mode
     catalog =
         createCatalog(
-            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", auditInfo);
+            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", AUDIT_INFO);
     backend.insert(catalog, false);
 
     schema =
@@ -283,7 +338,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog"),
             "schema",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(schema, false);
 
     fileset =
@@ -291,14 +346,14 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "fileset",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(fileset, false);
     table =
         createTableEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "table",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(table, false);
 
     topic =
@@ -306,7 +361,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "topic",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(topic, false);
 
     model =
@@ -317,23 +372,44 @@ public class TestSecurableObjects extends TestJDBCBackend {
             "comment",
             1,
             null,
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(model, false);
+
+    view =
+        createViewEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "view");
+    backend.insert(view, false);
+    FunctionEntity function2 =
+        createFunctionEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "function",
+            AUDIT_INFO);
+    backend.insert(function2, false);
 
     role1 =
         createRoleEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             AuthorizationUtils.ofRoleNamespace(metalakeName),
             "role1",
-            auditInfo,
+            AUDIT_INFO,
             Lists.newArrayList(
-                catalogObject, schemaObject, tableObject, filesetObject, topicObject, modelObject),
+                catalogObject,
+                schemaObject,
+                tableObject,
+                filesetObject,
+                topicObject,
+                modelObject,
+                viewObject,
+                functionObject),
             ImmutableMap.of("k1", "v1"));
 
     roleMetaService.insertRole(role1, false);
 
     CatalogMetaService.getInstance().deleteCatalog(catalog.nameIdentifier(), true);
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
     Assertions.assertEquals(0, countActiveObjectRel(role1.id()));
 
     roleMetaService.deleteRole(role1.nameIdentifier());
@@ -341,7 +417,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
     // Test to delete schema with cascade mode
     catalog =
         createCatalog(
-            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", auditInfo);
+            RandomIdGenerator.INSTANCE.nextId(), Namespace.of("metalake"), "catalog", AUDIT_INFO);
     backend.insert(catalog, false);
 
     schema =
@@ -349,7 +425,7 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog"),
             "schema",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(schema, false);
 
     fileset =
@@ -357,21 +433,21 @@ public class TestSecurableObjects extends TestJDBCBackend {
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "fileset",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(fileset, false);
     table =
         createTableEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "table",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(table, false);
     topic =
         createTopicEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             Namespace.of("metalake", "catalog", "schema"),
             "topic",
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(topic, false);
     model =
         createModelEntity(
@@ -381,23 +457,84 @@ public class TestSecurableObjects extends TestJDBCBackend {
             "comment",
             1,
             null,
-            auditInfo);
+            AUDIT_INFO);
     backend.insert(model, false);
+
+    view =
+        createViewEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "view");
+    backend.insert(view, false);
+    FunctionEntity function3 =
+        createFunctionEntity(
+            RandomIdGenerator.INSTANCE.nextId(),
+            Namespace.of("metalake", "catalog", "schema"),
+            "function",
+            AUDIT_INFO);
+    backend.insert(function3, false);
 
     role1 =
         createRoleEntity(
             RandomIdGenerator.INSTANCE.nextId(),
             AuthorizationUtils.ofRoleNamespace(metalakeName),
             "role1",
-            auditInfo,
+            AUDIT_INFO,
             Lists.newArrayList(
-                catalogObject, schemaObject, tableObject, filesetObject, topicObject, modelObject),
+                catalogObject,
+                schemaObject,
+                tableObject,
+                filesetObject,
+                topicObject,
+                modelObject,
+                viewObject,
+                functionObject),
             ImmutableMap.of("k1", "v1"));
 
     roleMetaService.insertRole(role1, false);
 
     SchemaMetaService.getInstance().deleteSchema(schema.nameIdentifier(), true);
-    Assertions.assertEquals(6, countAllObjectRel(role1.id()));
+    Assertions.assertEquals(8, countAllObjectRel(role1.id()));
     Assertions.assertEquals(1, countActiveObjectRel(role1.id()));
+  }
+
+  private Integer countAllObjectRel(Long roleId) {
+    try (SqlSession sqlSession =
+            SqlSessionFactoryHelper.getInstance().getSqlSessionFactory().openSession(true);
+        Connection connection = sqlSession.getConnection();
+        Statement statement1 = connection.createStatement();
+        ResultSet rs1 =
+            statement1.executeQuery(
+                String.format(
+                    "SELECT count(*) FROM role_meta_securable_object WHERE role_id = %d",
+                    roleId))) {
+      if (rs1.next()) {
+        return rs1.getInt(1);
+      } else {
+        throw new RuntimeException("Doesn't contain data");
+      }
+    } catch (SQLException se) {
+      throw new RuntimeException("SQL execution failed", se);
+    }
+  }
+
+  private Integer countActiveObjectRel(Long roleId) {
+    try (SqlSession sqlSession =
+            SqlSessionFactoryHelper.getInstance().getSqlSessionFactory().openSession(true);
+        Connection connection = sqlSession.getConnection();
+        Statement statement1 = connection.createStatement();
+        ResultSet rs1 =
+            statement1.executeQuery(
+                String.format(
+                    "SELECT count(*) FROM role_meta_securable_object WHERE role_id = %d AND deleted_at = 0",
+                    roleId))) {
+      if (rs1.next()) {
+        return rs1.getInt(1);
+      } else {
+        throw new RuntimeException("Doesn't contain data");
+      }
+    } catch (SQLException se) {
+      throw new RuntimeException("SQL execution failed", se);
+    }
   }
 }

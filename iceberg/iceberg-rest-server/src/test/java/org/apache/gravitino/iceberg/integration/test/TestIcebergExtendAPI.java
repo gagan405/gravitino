@@ -19,6 +19,7 @@
 
 package org.apache.gravitino.iceberg.integration.test;
 
+import com.google.common.collect.ImmutableMap;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.gravitino.iceberg.common.IcebergConfig;
@@ -29,6 +30,7 @@ import org.apache.gravitino.server.web.JettyServerConfig;
 import org.apache.iceberg.rest.ErrorHandlers;
 import org.apache.iceberg.rest.HTTPClient;
 import org.apache.iceberg.rest.RESTClient;
+import org.apache.iceberg.rest.auth.AuthSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
@@ -38,12 +40,12 @@ import org.junit.jupiter.api.TestInstance.Lifecycle;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.shaded.com.google.common.collect.ImmutableMap;
 
 @TestInstance(Lifecycle.PER_CLASS)
 // We couldn't add REST extension package jar in deploy mode, so just test embedded mode.
 @EnabledIf("org.apache.gravitino.integration.test.util.ITUtils#isEmbedded")
 public class TestIcebergExtendAPI {
+
   public static final Logger LOG = LoggerFactory.getLogger(TestIcebergExtendAPI.class);
   private IcebergRESTServerManager icebergRESTServerManager;
   private String uri;
@@ -64,7 +66,8 @@ public class TestIcebergExtendAPI {
 
   @Test
   void testExtendAPI() {
-    RESTClient client = HTTPClient.builder(ImmutableMap.of()).uri(uri).build();
+    RESTClient client =
+        HTTPClient.builder(ImmutableMap.of()).uri(uri).withAuthSession(AuthSession.EMPTY).build();
     HelloResponse helloResponse =
         client.get(
             HelloOperations.HELLO_URI_PATH,

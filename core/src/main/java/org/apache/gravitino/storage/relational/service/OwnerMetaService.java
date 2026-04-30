@@ -18,15 +18,29 @@
  */
 package org.apache.gravitino.storage.relational.service;
 
+import static org.apache.gravitino.metrics.source.MetricsSource.GRAVITINO_RELATIONAL_STORE_METRIC_NAME;
+
+import com.google.common.base.Preconditions;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.gravitino.Entity;
-import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.RelationalEntity;
+import org.apache.gravitino.SupportsRelationOperations;
 import org.apache.gravitino.authorization.AuthorizationUtils;
+import org.apache.gravitino.meta.UserEntity;
+import org.apache.gravitino.metrics.Monitored;
 import org.apache.gravitino.storage.relational.mapper.OwnerMetaMapper;
 import org.apache.gravitino.storage.relational.po.GroupPO;
 import org.apache.gravitino.storage.relational.po.OwnerRelPO;
+import org.apache.gravitino.storage.relational.po.UserOwnerRelPO;
 import org.apache.gravitino.storage.relational.po.UserPO;
 import org.apache.gravitino.storage.relational.utils.POConverters;
 import org.apache.gravitino.storage.relational.utils.SessionUtils;
@@ -43,11 +57,10 @@ public class OwnerMetaService {
     return INSTANCE;
   }
 
+  @Monitored(metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME, baseMetricName = "getOwner")
   public Optional<Entity> getOwner(NameIdentifier identifier, Entity.EntityType type) {
-    long metalakeId =
-        MetalakeMetaService.getInstance()
-            .getMetalakeIdByName(NameIdentifierUtil.getMetalake(identifier));
-    Long entityId = getEntityId(metalakeId, identifier, type);
+
+    Long entityId = EntityIdService.getEntityId(identifier, type);
 
     UserPO userPO =
         SessionUtils.getWithoutCommit(
@@ -78,6 +91,60 @@ public class OwnerMetaService {
     return Optional.empty();
   }
 
+  @Monitored(
+      metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME,
+      baseMetricName = "batchGetOwner")
+  public List<RelationalEntity<?>> batchGetOwner(
+      List<NameIdentifier> identifiers, Entity.EntityType type) {
+    if (CollectionUtils.isEmpty(identifiers)) {
+      return new ArrayList<>();
+    }
+    String metalake = NameIdentifierUtil.getMetalake(identifiers.get(0));
+    for (NameIdentifier identifier : identifiers) {
+      Preconditions.checkArgument(
+          Objects.equals(NameIdentifierUtil.getMetalake(identifier), metalake),
+          "identifiers should in one metalake");
+    }
+    List<RelationalEntity<?>> result = new ArrayList<>();
+    Map<Long, NameIdentifier> nameIdentifierMap = new HashMap<>();
+    List<Long> entityIds =
+        identifiers.stream()
+            .map(
+                identifier -> {
+                  long entityId = EntityIdService.getEntityId(identifier, type);
+                  nameIdentifierMap.put(entityId, identifier);
+                  return entityId;
+                })
+            .collect(Collectors.toList());
+
+    // Get user owners
+    List<UserOwnerRelPO> userPOList =
+        SessionUtils.getWithoutCommit(
+            OwnerMetaMapper.class,
+            mapper ->
+                mapper.batchSelectUserOwnerMetaByMetadataObjectIdAndType(entityIds, type.name()));
+    if (CollectionUtils.isNotEmpty(userPOList)) {
+      userPOList.forEach(
+          userPO -> {
+            UserEntity userEntity =
+                POConverters.fromUserPO(
+                    userPO, Collections.emptyList(), AuthorizationUtils.ofUserNamespace(metalake));
+            result.add(
+                new RelationalEntity<>(
+                    SupportsRelationOperations.Type.OWNER_REL,
+                    nameIdentifierMap.get(userPO.getMetadataObjectId()),
+                    type,
+                    userEntity));
+          });
+    }
+
+    // TODO: Add batch support for group owners when GroupOwnerRelPO and batch method are available
+    // For now, we only handle user owners in batch mode
+
+    return result;
+  }
+
+  @Monitored(metricsSource = GRAVITINO_RELATIONAL_STORE_METRIC_NAME, baseMetricName = "setOwner")
   public void setOwner(
       NameIdentifier entity,
       Entity.EntityType entityType,
@@ -87,8 +154,8 @@ public class OwnerMetaService {
         MetalakeMetaService.getInstance()
             .getMetalakeIdByName(NameIdentifierUtil.getMetalake(entity));
 
-    Long entityId = getEntityId(metalakeId, entity, entityType);
-    Long ownerId = getEntityId(metalakeId, owner, ownerType);
+    Long entityId = EntityIdService.getEntityId(entity, entityType);
+    Long ownerId = EntityIdService.getEntityId(owner, ownerType);
 
     OwnerRelPO ownerRelPO =
         POConverters.initializeOwnerRelPOsWithVersion(
@@ -104,21 +171,5 @@ public class OwnerMetaService {
         () ->
             SessionUtils.doWithoutCommit(
                 OwnerMetaMapper.class, mapper -> mapper.insertOwnerRel(ownerRelPO)));
-  }
-
-  private static long getEntityId(
-      long metalakeId, NameIdentifier identifier, Entity.EntityType type) {
-    switch (type) {
-      case USER:
-        return UserMetaService.getInstance()
-            .getUserIdByMetalakeIdAndName(metalakeId, identifier.name());
-      case GROUP:
-        return GroupMetaService.getInstance()
-            .getGroupIdByMetalakeIdAndName(metalakeId, identifier.name());
-      default:
-        MetadataObject object = NameIdentifierUtil.toMetadataObject(identifier, type);
-        return MetadataObjectService.getMetadataObjectId(
-            metalakeId, object.fullName(), object.type());
-    }
   }
 }

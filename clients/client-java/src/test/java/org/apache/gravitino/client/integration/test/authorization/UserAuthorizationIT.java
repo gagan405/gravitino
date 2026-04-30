@@ -21,6 +21,8 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Maps;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
@@ -31,6 +33,9 @@ import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.User;
 import org.apache.gravitino.client.GravitinoAdminClient;
 import org.apache.gravitino.client.GravitinoMetalake;
+import org.apache.gravitino.dto.MetalakeDTO;
+import org.apache.gravitino.exceptions.ForbiddenException;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Tag;
@@ -46,7 +51,7 @@ public class UserAuthorizationIT extends BaseRestApiAuthorizationIT {
   public void testCreateUser() {
     assertThrows(
         "Current user can not access metadata {testMetalake}",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           normalUserClient.loadMetalake(METALAKE).addUser("user1");
         });
@@ -65,6 +70,14 @@ public class UserAuthorizationIT extends BaseRestApiAuthorizationIT {
           "user1",
         },
         usersLoadByUser1);
+    String[] usernames = client.loadMetalake(METALAKE).listUserNames();
+    Assertions.assertArrayEquals(new String[] {USER, NORMAL_USER, "user1", "user2"}, usernames);
+    String[] usernamesLoadByUser1 = getClientByUser("user1").loadMetalake(METALAKE).listUserNames();
+    Assertions.assertArrayEquals(
+        new String[] {
+          "user1",
+        },
+        usernamesLoadByUser1);
   }
 
   @Test
@@ -74,7 +87,7 @@ public class UserAuthorizationIT extends BaseRestApiAuthorizationIT {
     user1Client.loadMetalake(METALAKE).getUser("user1");
     assertThrows(
         "Current user can not get user.",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           user1Client.loadMetalake(METALAKE).getUser("user2");
         });
@@ -88,13 +101,13 @@ public class UserAuthorizationIT extends BaseRestApiAuthorizationIT {
     GravitinoAdminClient user1Client = getClientByUser("user1");
     assertThrows(
         "Current user can not get user",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           user1Client.loadMetalake(METALAKE).removeUser("user2");
         });
     assertThrows(
         "Current user can not get user.",
-        RuntimeException.class,
+        ForbiddenException.class,
         () -> {
           user1Client.loadMetalake(METALAKE).removeUser("user1");
         });
@@ -114,6 +127,50 @@ public class UserAuthorizationIT extends BaseRestApiAuthorizationIT {
     user1Client.loadMetalake(METALAKE).removeUser("user3");
     users = gravitinoMetalake.listUsers();
     assertUserEquals(new String[] {USER, NORMAL_USER, "user1"}, users);
+  }
+
+  @Test
+  @Order(4)
+  public void testListUsersWithNonExistentMetalake() throws Exception {
+    // Test that listUsers with @AuthorizationExpression returns 403 Forbidden
+    // when the metalake doesn't exist, instead of 404 response
+    String nonExistentMetalake = "nonExistentMetalake";
+
+    // Access the restClient from normalUserClient using reflection
+    Method restClientMethod =
+        normalUserClient.getClass().getSuperclass().getDeclaredMethod("restClient");
+    restClientMethod.setAccessible(true);
+    Object restClient = restClientMethod.invoke(normalUserClient);
+
+    // Create a MetalakeDTO for the non-existent metalake
+    MetalakeDTO metalakeDTO =
+        MetalakeDTO.builder()
+            .withName(nonExistentMetalake)
+            .withComment("test")
+            .withProperties(Maps.newHashMap())
+            .withAudit(
+                org.apache.gravitino.dto.AuditDTO.builder()
+                    .withCreator("test")
+                    .withCreateTime(java.time.Instant.now())
+                    .build())
+            .build();
+
+    // Use DTOConverters.toMetaLake() via reflection to create GravitinoMetalake
+    Class<?> dtoConvertersClass = Class.forName("org.apache.gravitino.client.DTOConverters");
+    Method toMetaLakeMethod =
+        dtoConvertersClass.getDeclaredMethod(
+            "toMetaLake",
+            MetalakeDTO.class,
+            Class.forName("org.apache.gravitino.client.RESTClient"));
+    toMetaLakeMethod.setAccessible(true);
+    GravitinoMetalake nonExistentMetalakeObj =
+        (GravitinoMetalake) toMetaLakeMethod.invoke(null, metalakeDTO, restClient);
+
+    // Test listUsers - should return 403 ForbiddenException
+    assertThrows(ForbiddenException.class, nonExistentMetalakeObj::listUsers);
+
+    // Test listUserNames - should return 403 ForbiddenException
+    assertThrows(ForbiddenException.class, nonExistentMetalakeObj::listUserNames);
   }
 
   private void assertUserEquals(String[] exceptUsers, User[] actualUsers) {

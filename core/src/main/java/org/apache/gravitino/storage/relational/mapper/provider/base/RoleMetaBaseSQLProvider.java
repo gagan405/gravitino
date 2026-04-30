@@ -63,7 +63,7 @@ public class RoleMetaBaseSQLProvider {
         + " AND ro.deleted_at = 0 AND re.deleted_at = 0";
   }
 
-  public String listRolesByGroupId(Long groupId) {
+  public String listRolesByGroupId(@Param("groupId") Long groupId) {
     return "SELECT ro.role_id as roleId, ro.role_name as roleName,"
         + " ro.metalake_id as metalakeId, ro.properties as properties,"
         + " ro.audit_info as auditInfo, ro.current_version as currentVersion,"
@@ -111,10 +111,10 @@ public class RoleMetaBaseSQLProvider {
   public String insertRoleMeta(@Param("roleMeta") RolePO rolePO) {
     return "INSERT INTO "
         + ROLE_TABLE_NAME
-        + "(role_id, role_name,"
+        + " (role_id, role_name,"
         + " metalake_id, properties,"
         + " audit_info, current_version, last_version, deleted_at)"
-        + " VALUES("
+        + " VALUES ("
         + " #{roleMeta.roleId},"
         + " #{roleMeta.roleName},"
         + " #{roleMeta.metalakeId},"
@@ -129,10 +129,10 @@ public class RoleMetaBaseSQLProvider {
   public String insertRoleMetaOnDuplicateKeyUpdate(@Param("roleMeta") RolePO rolePO) {
     return "INSERT INTO "
         + ROLE_TABLE_NAME
-        + "(role_id, role_name,"
+        + " (role_id, role_name,"
         + " metalake_id, properties,"
         + " audit_info, current_version, last_version, deleted_at)"
-        + " VALUES("
+        + " VALUES ("
         + " #{roleMeta.roleId},"
         + " #{roleMeta.roleName},"
         + " #{roleMeta.metalakeId},"
@@ -170,7 +170,7 @@ public class RoleMetaBaseSQLProvider {
         + " AND deleted_at = 0";
   }
 
-  public String softDeleteRoleMetaByRoleId(Long roleId) {
+  public String softDeleteRoleMetaByRoleId(@Param("roleId") Long roleId) {
     return "UPDATE "
         + ROLE_TABLE_NAME
         + " SET deleted_at = (UNIX_TIMESTAMP() * 1000.0)"

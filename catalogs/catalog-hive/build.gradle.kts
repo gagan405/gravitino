@@ -30,83 +30,75 @@ val icebergVersion: String = libs.versions.iceberg.get()
 val scalaCollectionCompatVersion: String = libs.versions.scala.collection.compat.get()
 
 dependencies {
-  implementation(project(":api")) {
-    exclude("*")
-  }
-  implementation(project(":catalogs:catalog-common")) {
-    exclude("*")
-  }
-  implementation(project(":catalogs:hive-metastore-common"))
-  implementation(project(":core")) {
-    exclude("*")
-  }
-
-  implementation(libs.commons.collections3)
-  implementation(libs.commons.configuration1)
-  implementation(libs.htrace.core4)
-  implementation(libs.commons.io)
-  implementation(libs.guava)
-  implementation(libs.hadoop2.auth) {
-    exclude("*")
-  }
-  implementation(libs.woodstox.core)
-  implementation(libs.hive2.metastore) {
-    exclude("ant")
-    exclude("co.cask.tephra")
-    exclude("com.github.joshelser")
-    exclude("com.google.code.findbugs", "jsr305")
-    exclude("com.google.code.findbugs", "sr305")
-    exclude("com.tdunning", "json")
-    exclude("com.zaxxer", "HikariCP")
-    exclude("io.dropwizard.metrics")
-    exclude("javax.transaction", "transaction-api")
-    exclude("org.apache.ant")
-    exclude("org.apache.avro")
-    exclude("org.apache.curator")
-    exclude("org.apache.derby")
-    exclude("org.apache.hadoop", "hadoop-yarn-server-resourcemanager")
-    exclude("org.apache.hbase")
-    exclude("org.apache.logging.log4j")
-    exclude("org.apache.parquet", "parquet-hadoop-bundle")
-    exclude("org.apache.zookeeper")
-    exclude("org.datanucleus")
-    exclude("org.eclipse.jetty.aggregate", "jetty-all")
-    exclude("org.eclipse.jetty.orbit", "javax.servlet")
-    exclude("org.openjdk.jol")
-    exclude("org.slf4j")
-  }
-
-  implementation(libs.hadoop2.common) {
-    exclude("*")
-  }
-  implementation(libs.hadoop2.mapreduce.client.core) {
-    exclude("*")
-  }
-  implementation(libs.slf4j.api)
+  compileOnly(project(":api"))
+  compileOnly(project(":common"))
+  compileOnly(project(":core"))
 
   compileOnly(libs.immutables.value)
   compileOnly(libs.lombok)
 
+  implementation(project(":catalogs:catalog-common")) {
+    exclude("*")
+  }
+  implementation(project(":catalogs:hive-metastore-common"))
+
+  implementation(libs.commons.collections3)
+  implementation(libs.commons.configuration1) {
+    exclude(group = "commons-beanutils")
+  }
+  implementation(libs.commons.io)
+  implementation(libs.commons.lang3)
+  implementation(libs.guava)
+  implementation(libs.hadoop2.auth) {
+    exclude("*")
+  }
+  implementation(libs.hadoop2.common) {
+    exclude("*")
+  }
+  implementation(libs.htrace.core4)
+  implementation(libs.slf4j.api)
+  implementation(libs.woodstox.core)
+
   annotationProcessor(libs.immutables.value)
   annotationProcessor(libs.lombok)
 
-  testImplementation(project(":catalogs:hive-metastore-common", "testArtifacts"))
-  testImplementation(project(":common"))
-  testImplementation(project(":clients:client-java"))
-  testImplementation(project(":integration-test-common", "testArtifacts"))
-  testImplementation(project(":server"))
-  testImplementation(project(":server-common"))
+  testImplementation(project(":api"))
   testImplementation(project(":catalogs:hadoop-common")) {
     exclude("*")
   }
+  testImplementation(project(":catalogs:hive-metastore-common", "testArtifacts"))
+  testImplementation(project(":clients:client-java"))
+  testImplementation(project(":common"))
+  testImplementation(project(":core"))
+  testImplementation(project(":integration-test-common", "testArtifacts"))
+  testImplementation(project(":server"))
+  testImplementation(project(":server-common"))
 
-  testImplementation(libs.bundles.jetty)
+  testImplementation("org.apache.spark:spark-hive_$scalaVersion:$sparkVersion") {
+    exclude("org.apache.hadoop")
+  }
+  testImplementation("org.apache.spark:spark-sql_$scalaVersion:$sparkVersion") {
+    exclude("org.apache.avro")
+    exclude("org.apache.hadoop")
+    exclude("org.apache.zookeeper")
+    exclude("io.dropwizard.metrics")
+    exclude("org.rocksdb")
+  }
+  testImplementation("org.scala-lang.modules:scala-collection-compat_$scalaVersion:$scalaCollectionCompatVersion")
+  testImplementation(libs.awaitility)
   testImplementation(libs.bundles.jersey)
+  testImplementation(libs.bundles.jetty)
   testImplementation(libs.bundles.log4j)
+  testImplementation(libs.hadoop2.aws)
+  testImplementation(libs.hadoop2.common) {
+    exclude("*")
+  }
   testImplementation(libs.hadoop2.hdfs)
   testImplementation(libs.hadoop2.mapreduce.client.core) {
     exclude("*")
   }
+  testImplementation(libs.hadoop3.abs)
+  testImplementation(libs.hadoop3.gcs)
   testImplementation(libs.hive2.common) {
     exclude("org.eclipse.jetty.aggregate", "jetty-all")
     exclude("org.eclipse.jetty.orbit", "javax.servlet")
@@ -115,25 +107,10 @@ dependencies {
   testImplementation(libs.mockito.core)
   testImplementation(libs.mysql.driver)
   testImplementation(libs.postgresql.driver)
-
-  testImplementation("org.apache.spark:spark-hive_$scalaVersion:$sparkVersion") {
-    exclude("org.apache.hadoop")
-  }
-  testImplementation("org.scala-lang.modules:scala-collection-compat_$scalaVersion:$scalaCollectionCompatVersion")
-  testImplementation("org.apache.spark:spark-sql_$scalaVersion:$sparkVersion") {
-    exclude("org.apache.avro")
-    exclude("org.apache.hadoop")
-    exclude("org.apache.zookeeper")
-    exclude("io.dropwizard.metrics")
-    exclude("org.rocksdb")
-  }
   testImplementation(libs.slf4j.api)
   testImplementation(libs.testcontainers)
-  testImplementation(libs.testcontainers.mysql)
   testImplementation(libs.testcontainers.localstack)
-  testImplementation(libs.hadoop2.aws)
-  testImplementation(libs.hadoop3.abs)
-  testImplementation(libs.hadoop3.gcs)
+  testImplementation(libs.testcontainers.mysql)
 
   // You need this to run test CatalogHiveABSIT as it required hadoop3 environment introduced by hadoop3.abs
   // (The protocol `abfss` was first introduced in Hadoop 3.2.0), However, as the there already exists
@@ -147,7 +124,7 @@ dependencies {
 }
 
 tasks {
-  val runtimeJars by registering(Copy::class) {
+  register("runtimeJars", Copy::class) {
     from(configurations.runtimeClasspath)
     into("build/libs")
   }
@@ -158,6 +135,7 @@ tasks {
       exclude("guava-*.jar")
       exclude("log4j-*.jar")
       exclude("slf4j-*.jar")
+      exclude("error_prone_annotations-*.jar")
       // Exclude the following jars to avoid conflict with the jars in authorization-gcp
       exclude("protobuf-java-*.jar")
     }

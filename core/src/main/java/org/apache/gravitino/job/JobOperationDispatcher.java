@@ -19,6 +19,7 @@
 
 package org.apache.gravitino.job;
 
+import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -30,7 +31,7 @@ import org.apache.gravitino.meta.JobEntity;
 import org.apache.gravitino.meta.JobTemplateEntity;
 
 /** The interface for job operation dispatcher. */
-public interface JobOperationDispatcher {
+public interface JobOperationDispatcher extends Closeable {
 
   /**
    * Lists all the job templates in the specified metalake.
@@ -71,6 +72,20 @@ public interface JobOperationDispatcher {
    * @throws InUseException if there are still queued or started jobs associated with the job
    */
   boolean deleteJobTemplate(String metalake, String jobTemplateName) throws InUseException;
+
+  /**
+   * Alters a job template by applying the specified changes in the specified metalake.
+   *
+   * @param metalake the name of the metalake
+   * @param jobTemplateName the name of the job template to alter
+   * @param changes the changes to apply to the job template
+   * @return the updated job template entity after applying the changes
+   * @throws NoSuchJobTemplateException if no job template with the specified name exists
+   * @throws IllegalArgumentException if any of the changes cannot be applied to the job template.
+   */
+  JobTemplateEntity alterJobTemplate(
+      String metalake, String jobTemplateName, JobTemplateChange... changes)
+      throws NoSuchJobTemplateException, IllegalArgumentException;
 
   /**
    * List all the jobs. If the jobTemplateName is provided, it will list the jobs associated with

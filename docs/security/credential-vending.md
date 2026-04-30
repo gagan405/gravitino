@@ -14,7 +14,7 @@ Gravitino credential vending is used to generate temporary or static credentials
 - Supports Gravitino Iceberg REST server.
 - Supports Gravitino server, only support Hadoop catalog.
 - Supports pluggable credentials with build-in credentials:
-  - S3: `S3TokenCredential`, `S3SecretKeyCredential`
+  - S3: `S3TokenCredential`, `S3SecretKeyCredential`, `AwsIrsaCredential`
   - GCS: `GCSTokenCredential`
   - ADLS: `ADLSTokenCredential`, `AzureAccountKeyCredential`
   - OSS: `OSSTokenCredential`, `OSSSecretKeyCredential`
@@ -32,6 +32,33 @@ Gravitino credential vending is used to generate temporary or static credentials
 ## Build-in credentials configurations
 
 ### S3 credentials
+
+#### S3 IRSA credential
+
+A credential using AWS IAM Roles for Service Accounts (IRSA) to access S3 with temporary credentials, typically used in EKS environments. This provider supports both basic IRSA credentials and fine-grained path-based access control with dynamically generated IAM policies.
+
+**Features:**
+- **Basic IRSA mode**: Returns credentials with full permissions of the associated IAM role (for non-path-based contexts)
+- **Fine-grained mode**: Generates path-specific credentials with minimal required permissions (for table access with `X-Iceberg-Access-Delegation: vended-credentials`)
+- **Automatic policy generation**: Creates custom IAM policies scoped to specific table paths including data, metadata, and write locations
+- **EKS integration**: Leverages existing IRSA setup while providing enhanced security through path-based restrictions
+
+
+| Gravitino server catalog properties | Gravitino Iceberg REST server configurations       | Description                                                                                               | Default value | Required | Since Version |
+|-------------------------------------|----------------------------------------------------|-----------------------------------------------------------------------------------------------------------|---------------|----------|---------------|
+| `credential-providers`              | `gravitino.iceberg-rest.credential-providers`      | `aws-irsa` for AWS IRSA credential provider.                                                              | (none)        | Yes      | 1.0.0         |
+| `s3-role-arn`                       | `gravitino.iceberg-rest.s3-role-arn`               | The ARN of the IAM role to assume. Required for fine-grained path-based access control.                   | (none)        | Yes*     | 1.0.0         |
+| `s3-region`                         | `gravitino.iceberg-rest.s3-region`                 | The AWS region for STS operations. Used for fine-grained access control.                                  | (none)        | No       | 1.0.0         |
+| `s3-token-expire-in-secs`           | `gravitino.iceberg-rest.s3-token-expire-in-secs`   | Token expiration time in seconds for fine-grained credentials. Cannot exceed role's max session duration. | 3600          | No       | 1.0.0         |
+| `s3-token-service-endpoint`         | `gravitino.iceberg-rest.s3-token-service-endpoint` | Alternative STS endpoint for fine-grained credential generation. Useful for S3-compatible services.       | (none)        | No       | 1.0.0         |
+
+**Note**: `s3-role-arn` is required only when using fine-grained path-based access control with vended credentials. For basic IRSA usage without path restrictions, only `credential-providers=aws-irsa` is needed.
+
+**Prerequisites for fine-grained mode:**
+- EKS cluster with IRSA properly configured
+- `AWS_WEB_IDENTITY_TOKEN_FILE` environment variable pointing to the service account token
+- IAM role with permissions to assume the target role specified in `s3-role-arn`
+- Target IAM role with necessary S3 permissions for the data locations
 
 #### S3 secret key credential
 
@@ -128,34 +155,34 @@ For Gravitino Iceberg REST server, please ensure that the credential file can be
 
 ## Custom credentials
 
-Gravitino supports custom credentials, you can implement the `org.apache.gravitino.credential.CredentialProvider` interface to support custom credentials, and place the corresponding jar to the classpath of Iceberg catalog server or Hadoop catalog.
+Gravitino supports custom credentials, you can implement the `org.apache.gravitino.credential.CredentialProvider` interface to support custom credentials, and place the corresponding jar to the classpath of Iceberg catalog server or Fileset catalog.
 
 ## Deployment
 
-Besides setting credentials related configuration, please download Gravitino cloud bundle jar and place it in the classpath of Iceberg REST server or Hadoop catalog.
+Besides setting credentials related configuration, please download the related cloud bundle jar and place it in the classpath of Iceberg REST server or Fileset catalog.
 
-For Hadoop catalog, please use Gravitino cloud bundle jar with Hadoop and cloud packages:
+For Fileset catalog, please use Gravitino cloud bundle jar with Hadoop and cloud packages:
 
 - [Gravitino AWS bundle jar with Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aws-bundle)
 - [Gravitino Aliyun bundle jar with Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aliyun-bundle)
 - [Gravitino GCP bundle jar with Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-gcp-bundle)
 - [Gravitino Azure bundle jar with Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-azure-bundle)
 
-For Iceberg REST catalog server, please use the Gravitino cloud bundle jar without Hadoop and cloud packages. Additionally, download the corresponding Iceberg cloud packages.
+For Iceberg REST catalog server, please download the corresponding Gravitino cloud packages.
 
-- [Gravitino AWS bundle jar without Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aws)
-- [Gravitino Aliyun bundle jar without Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aliyun)
-- [Gravitino GCP bundle jar without Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-gcp)
-- [Gravitino Azure bundle jar without Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-azure)
+- [Gravitino Iceberg AWS bundle JAR](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-iceberg-aws-bundle)
+- [Gravitino Iceberg GCP bundle JAR](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-iceberg-aliyun-bundle)
+- [Gravitino Iceberg Aliyun bundle JAR](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-iceberg-gcp-bundle)
+- [Gravitino Iceberg Azure bundle JAR](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-iceberg-azure-bundle)
 
 :::note
-For OSS, Iceberg doesn't provide Iceberg Aliyun bundle jar which contains OSS packages, you could provide the OSS jar by yourself or use [Gravitino Aliyun bundle jar with Hadoop and cloud packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aliyun-bundle), please refer to [OSS configuration](../iceberg-rest-service.md#oss-configuration) for more details.
+Since Gravitino 1.1.0, the above Gravitino Iceberg cloud bundle jars have already included the Iceberg cloud bundle jars, no need to download and include them separately.
 :::
 
 The classpath of the server:
 
 - Iceberg REST server: the classpath differs in different deploy mode, please refer to [Server management](../iceberg-rest-service.md#server-management) part.
-- Hadoop catalog: `catalogs/hadoop/libs/`
+- Fileset catalog: `catalogs/fileset/libs/`
 
 ## Usage example
 
@@ -163,7 +190,7 @@ The classpath of the server:
 
 Suppose the Iceberg table data is stored in S3, follow the steps below:
 
-1. Download the [Gravitino AWS bundle jar without hadoop packages](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-aws), and place it to the classpath of Iceberg REST server.
+1. Download the [Gravitino Iceberg AWS bundle JAR](https://mvnrepository.com/artifact/org.apache.gravitino/gravitino-iceberg-aws-bundle), and place it in the classpath of Iceberg REST server.
 
 2. Add s3 token credential configurations.
 
@@ -177,7 +204,7 @@ gravitino.iceberg-rest.s3-region = {region_name}
 gravitino.iceberg-rest.s3-role-arn = {role_arn}
 ```
 
-3. Exploring the Iceberg table with Spark client with credential vending enabled.
+3. Exploring the Iceberg table with a Spark client with credential vending enabled.
 
 ```shell
 ./bin/spark-sql -v \

@@ -30,7 +30,7 @@ var paimonVersion: String = libs.versions.paimon.get()
 val flinkVersion: String = libs.versions.flink.get()
 val flinkMajorVersion: String = flinkVersion.substringBeforeLast(".")
 
-val icebergVersion: String = libs.versions.iceberg.get()
+val icebergVersion: String = libs.versions.iceberg4connector.get()
 
 // The Flink only support scala 2.12, and all scala api will be removed in a future version.
 // You can find more detail at the following issues:
@@ -41,10 +41,6 @@ val scalaVersion: String = "2.12"
 val artifactName = "${rootProject.name}-flink-${flinkMajorVersion}_$scalaVersion"
 
 dependencies {
-  implementation(project(":core")) {
-    exclude("org.apache.logging.log4j")
-    exclude("org.opensearch.client")
-  }
   implementation(project(":catalogs:catalog-common")) {
     exclude("org.apache.logging.log4j")
   }
@@ -90,6 +86,7 @@ dependencies {
   testImplementation(project(":integration-test-common", "testArtifacts"))
   testImplementation(project(":server"))
   testImplementation(project(":server-common"))
+  testImplementation(libs.awaitility)
   testImplementation(libs.junit.jupiter.api)
   testImplementation(libs.junit.jupiter.params)
   testImplementation(libs.mockito.core)
@@ -100,6 +97,7 @@ dependencies {
   testImplementation(libs.testcontainers.mysql)
   testImplementation(libs.metrics.core)
   testImplementation(libs.flinkjdbc)
+  testImplementation(libs.minikdc)
 
   testImplementation("org.apache.iceberg:iceberg-core:$icebergVersion")
   testImplementation("org.apache.iceberg:iceberg-hive-metastore:$icebergVersion")
@@ -107,6 +105,7 @@ dependencies {
   testImplementation("org.apache.flink:flink-connector-hive_$scalaVersion:$flinkVersion")
   testImplementation("org.apache.flink:flink-table-common:$flinkVersion")
   testImplementation("org.apache.flink:flink-table-api-java:$flinkVersion")
+  testImplementation("org.apache.flink:flink-sql-gateway:$flinkVersion")
   testImplementation("org.apache.paimon:paimon-flink-$flinkMajorVersion:$paimonVersion")
 
   testImplementation(libs.hive2.exec) {

@@ -20,10 +20,8 @@ package org.apache.gravitino.spark.connector.integration.test.jdbc;
 
 import org.apache.gravitino.spark.connector.jdbc.postgresql.GravitinoPostgreSqlCatalogSpark33;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
-@Disabled("Disabled until PG table creation is supported")
 public class SparkJdbcPostgreSqlCatalogIT33 extends SparkJdbcPostgreSqlCatalogIT {
 
   @Test
@@ -34,5 +32,11 @@ public class SparkJdbcPostgreSqlCatalogIT33 extends SparkJdbcPostgreSqlCatalogIT
             .conf()
             .getConfString("spark.sql.catalog." + getCatalogName());
     Assertions.assertEquals(GravitinoPostgreSqlCatalogSpark33.class.getName(), catalogClass);
+  }
+
+  @Override
+  protected boolean supportsFunction() {
+    // Spark 3.3 does not support function operations
+    return false;
   }
 }

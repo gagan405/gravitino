@@ -22,44 +22,92 @@ package org.apache.gravitino.iceberg.service;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
+import java.io.IOException;
+import java.net.URI;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergConstants;
 import org.apache.gravitino.credential.CatalogCredentialManager;
 import org.apache.gravitino.credential.Credential;
 import org.apache.gravitino.credential.CredentialConstants;
+import org.apache.gravitino.credential.CredentialPrivilege;
 import org.apache.gravitino.credential.CredentialPropertyUtils;
 import org.apache.gravitino.credential.PathBasedCredentialContext;
 import org.apache.gravitino.iceberg.common.IcebergConfig;
 import org.apache.gravitino.iceberg.common.ops.IcebergCatalogWrapper;
+import org.apache.gravitino.iceberg.service.cache.ScanPlanCache;
+import org.apache.gravitino.iceberg.service.cache.ScanPlanCacheKey;
 import org.apache.gravitino.storage.GCSProperties;
+import org.apache.gravitino.utils.ClassUtils;
 import org.apache.gravitino.utils.MapUtils;
 import org.apache.gravitino.utils.PrincipalUtils;
+import org.apache.iceberg.BaseMetadataTable;
+import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.IncrementalAppendScan;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Scan;
+import org.apache.iceberg.ScanTaskParser;
+import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.TableScan;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
+import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ServiceUnavailableException;
+import org.apache.iceberg.inmemory.InMemoryFileIO;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.rest.CatalogHandlers;
+import org.apache.iceberg.rest.PlanStatus;
+import org.apache.iceberg.rest.RESTCatalog;
 import org.apache.iceberg.rest.requests.CreateTableRequest;
+import org.apache.iceberg.rest.requests.PlanTableScanRequest;
+import org.apache.iceberg.rest.requests.RegisterTableRequest;
+import org.apache.iceberg.rest.requests.UpdateTableRequest;
+import org.apache.iceberg.rest.responses.ImmutableLoadCredentialsResponse;
+import org.apache.iceberg.rest.responses.LoadCredentialsResponse;
 import org.apache.iceberg.rest.responses.LoadTableResponse;
+import org.apache.iceberg.rest.responses.PlanTableScanResponse;
 
 /** Process Iceberg REST specific operations, like credential vending. */
 public class CatalogWrapperForREST extends IcebergCatalogWrapper {
 
   private final CatalogCredentialManager catalogCredentialManager;
 
-  private final Map<String, String> catalogConfigToClients;
+  private volatile Map<String, String> catalogConfigToClients;
+  private final Object catalogConfigToClientsLock = new Object();
+
+  private final ScanPlanCache scanPlanCache;
+
+  private static final String DATA_ACCESS_VENDED_CREDENTIALS = "vended-credentials";
+  private static final String DATA_ACCESS_REMOTE_SIGNING = "remote-signing";
 
   private static final Set<String> catalogPropertiesToClientKeys =
       ImmutableSet.of(
           IcebergConstants.IO_IMPL,
           IcebergConstants.AWS_S3_REGION,
           IcebergConstants.ICEBERG_S3_ENDPOINT,
-          IcebergConstants.ICEBERG_OSS_ENDPOINT);
+          IcebergConstants.ICEBERG_OSS_ENDPOINT,
+          IcebergConstants.ICEBERG_S3_PATH_STYLE_ACCESS,
+          IcebergConstants.ICEBERG_ACCESS_DELEGATION);
 
   @SuppressWarnings("deprecation")
   private static Map<String, String> deprecatedProperties =
@@ -71,47 +119,214 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
 
   public CatalogWrapperForREST(String catalogName, IcebergConfig config) {
     super(config);
-    this.catalogConfigToClients =
-        MapUtils.getFilteredMap(
-            config.getIcebergCatalogProperties(),
-            key -> catalogPropertiesToClientKeys.contains(key));
     // To be compatible with old properties
     Map<String, String> catalogProperties =
         checkForCompatibility(config.getAllConfig(), deprecatedProperties);
     this.catalogCredentialManager = new CatalogCredentialManager(catalogName, catalogProperties);
+    this.scanPlanCache = loadScanPlanCache(config);
   }
 
   public LoadTableResponse createTable(
       Namespace namespace, CreateTableRequest request, boolean requestCredential) {
-    LoadTableResponse loadTableResponse = super.createTable(namespace, request);
-    if (requestCredential) {
+    LoadTableResponse loadTableResponse;
+    if (isRESTCatalog()) {
+      loadTableResponse = createTableInternal(namespace, request);
+    } else {
+      loadTableResponse = super.createTable(namespace, request);
+    }
+    if (shouldGenerateCredential(loadTableResponse, requestCredential)) {
       return injectCredentialConfig(
-          TableIdentifier.of(namespace, request.name()), loadTableResponse);
+          TableIdentifier.of(namespace, request.name()),
+          loadTableResponse,
+          CredentialPrivilege.WRITE);
     }
     return loadTableResponse;
   }
 
-  public LoadTableResponse loadTable(TableIdentifier identifier, boolean requestCredential) {
-    LoadTableResponse loadTableResponse = super.loadTable(identifier);
-    if (requestCredential) {
-      return injectCredentialConfig(identifier, loadTableResponse);
+  public LoadTableResponse loadTable(
+      TableIdentifier identifier, boolean requestCredential, CredentialPrivilege privilege) {
+    LoadTableResponse loadTableResponse;
+    if (isRESTCatalog()) {
+      loadTableResponse = loadTableInternal(identifier);
+    } else {
+      loadTableResponse = super.loadTable(identifier);
+    }
+    if (shouldGenerateCredential(loadTableResponse, requestCredential)) {
+      return injectCredentialConfig(identifier, loadTableResponse, privilege);
+    }
+    return loadTableResponse;
+  }
+
+  public LoadTableResponse registerTable(
+      Namespace namespace, RegisterTableRequest request, boolean requestCredential) {
+    LoadTableResponse loadTableResponse = super.registerTable(namespace, request);
+    if (shouldGenerateCredential(loadTableResponse, requestCredential)) {
+      // Vend WRITE credentials: the registering user becomes the table owner
+      // (IcebergNamespaceHookDispatcher.setTableOwner runs after this call
+      // returns), consistent with createTable which also vends WRITE.
+      return injectCredentialConfig(
+          TableIdentifier.of(namespace, request.name()),
+          loadTableResponse,
+          CredentialPrivilege.WRITE);
     }
     return loadTableResponse;
   }
 
   @Override
-  public void close() {
-    if (catalogCredentialManager != null) {
-      catalogCredentialManager.close();
+  public LoadTableResponse updateTable(
+      TableIdentifier tableIdentifier, UpdateTableRequest updateTableRequest) {
+    if (isRESTCatalog()) {
+      return CatalogHandlers.updateTable(getCatalog(), tableIdentifier, updateTableRequest);
+    } else {
+      return super.updateTable(tableIdentifier, updateTableRequest);
+    }
+  }
+
+  /**
+   * Get table credentials.
+   *
+   * @param identifier The table identifier for which to load credentials
+   * @return A {@link org.apache.iceberg.rest.responses.LoadCredentialsResponse} object containing
+   *     the credentials.
+   */
+  public LoadCredentialsResponse getTableCredentials(
+      TableIdentifier identifier, CredentialPrivilege privilege) {
+    try {
+      LoadTableResponse loadTableResponse = super.loadTable(identifier);
+      Credential credential = getCredential(loadTableResponse, privilege);
+      org.apache.iceberg.rest.credentials.Credential icebergCredential =
+          new org.apache.iceberg.rest.credentials.Credential() {
+            @Override
+            public String prefix() {
+              return "";
+            }
+
+            @Override
+            public Map<String, String> config() {
+              // Convert Gravitino credentials to the Iceberg REST credential payload format.
+              return CredentialPropertyUtils.toIcebergProperties(credential);
+            }
+
+            @Override
+            public void validate() {}
+          };
+      return ImmutableLoadCredentialsResponse.builder().addCredentials(icebergCredential).build();
+    } catch (ServiceUnavailableException e) {
+      LOG.warn("Service unavailable when loading table credentials for table: {}", identifier, e);
+      return ImmutableLoadCredentialsResponse.builder().build();
+    }
+  }
+
+  @Override
+  public void close() throws Exception {
+    try {
+      if (catalogCredentialManager != null) {
+        catalogCredentialManager.close();
+      }
+      if (scanPlanCache != null) {
+        scanPlanCache.close();
+      }
+    } finally {
+      // Call super.close() to release parent class resources including:
+      // 1. Close underlying catalog (JdbcCatalog, WrappedHiveCatalog, etc.)
+      // 2. Close metadata cache
+      // 3. Cleanup JDBC drivers and threads (MySQL AbandonedConnectionCleanupThread, etc.)
+      super.close();
     }
   }
 
   public Map<String, String> getCatalogConfigToClient() {
-    return catalogConfigToClients;
+    Map<String, String> configToClients = catalogConfigToClients;
+    if (configToClients != null) {
+      return configToClients;
+    }
+
+    synchronized (catalogConfigToClientsLock) {
+      if (catalogConfigToClients == null) {
+        catalogConfigToClients = buildCatalogConfigToClients(getIcebergConfig(), getCatalog());
+      }
+      return catalogConfigToClients;
+    }
   }
 
-  private LoadTableResponse injectCredentialConfig(
-      TableIdentifier tableIdentifier, LoadTableResponse loadTableResponse) {
+  /**
+   * Builds properties exposed to Iceberg clients via the IRC {@code /v1/config} defaults.
+   *
+   * <p>For {@link RESTCatalog}, uses {@link RESTCatalog#properties()} so defaults reflect the
+   * remote catalog's config response merged with client properties (after REST handshake), not only
+   * static Gravitino catalog configuration.
+   */
+  @VisibleForTesting
+  static Map<String, String> buildCatalogConfigToClients(IcebergConfig config, Catalog catalog) {
+    Map<String, String> sourceProps;
+    if (catalog instanceof RESTCatalog) {
+      Map<String, String> merged = ((RESTCatalog) catalog).properties();
+      sourceProps = merged != null ? new HashMap<>(merged) : new HashMap<>();
+    } else {
+      sourceProps = new HashMap<>(config.getIcebergCatalogProperties());
+    }
+
+    Map<String, String> filtered =
+        MapUtils.getFilteredMap(sourceProps, key -> catalogPropertiesToClientKeys.contains(key));
+    filtered = new HashMap<>(filtered);
+    validateAndNormalizeDataAccessProperty(filtered);
+
+    return Collections.unmodifiableMap(filtered);
+  }
+
+  @VisibleForTesting
+  static void validateAndNormalizeDataAccessProperty(Map<String, String> properties) {
+    String dataAccess = properties.get(IcebergConstants.ICEBERG_ACCESS_DELEGATION);
+    if (StringUtils.isBlank(dataAccess)) {
+      return;
+    }
+
+    String normalizedDataAccess = dataAccess.toLowerCase(Locale.ROOT);
+    if (!DATA_ACCESS_VENDED_CREDENTIALS.equals(normalizedDataAccess)
+        && !DATA_ACCESS_REMOTE_SIGNING.equals(normalizedDataAccess)) {
+      throw new IllegalArgumentException(
+          "Invalid catalog property '"
+              + IcebergConstants.DATA_ACCESS
+              + "': "
+              + dataAccess
+              + ", supported values are ["
+              + DATA_ACCESS_VENDED_CREDENTIALS
+              + ","
+              + DATA_ACCESS_REMOTE_SIGNING
+              + "]");
+    }
+  }
+
+  @Override
+  protected boolean useDifferentClassLoader() {
+    return false;
+  }
+
+  @VisibleForTesting
+  protected LoadTableResponse injectCredentialConfig(
+      TableIdentifier tableIdentifier,
+      LoadTableResponse loadTableResponse,
+      CredentialPrivilege privilege) {
+    final Credential credential = getCredential(loadTableResponse, privilege);
+
+    LOG.info(
+        "Generate credential: {} for Iceberg table: {}",
+        credential.credentialType(),
+        tableIdentifier);
+
+    // Merge temporary credential fields as Iceberg client config entries in the load-table
+    // response.
+    Map<String, String> credentialConfig = CredentialPropertyUtils.toIcebergProperties(credential);
+    return LoadTableResponse.builder()
+        .withTableMetadata(loadTableResponse.tableMetadata())
+        .addAllConfig(loadTableResponse.config())
+        .addAllConfig(getCatalogConfigToClient())
+        .addAllConfig(credentialConfig)
+        .build();
+  }
+
+  private Credential getCredential(
+      LoadTableResponse loadTableResponse, CredentialPrivilege privilege) {
     TableMetadata tableMetadata = loadTableResponse.tableMetadata();
     String[] path =
         Stream.of(
@@ -122,25 +337,297 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
             .toArray(String[]::new);
 
     PathBasedCredentialContext context =
-        new PathBasedCredentialContext(
-            PrincipalUtils.getCurrentUserName(), ImmutableSet.copyOf(path), Collections.emptySet());
+        privilege == CredentialPrivilege.WRITE
+            ? new PathBasedCredentialContext(
+                PrincipalUtils.getCurrentUserName(),
+                ImmutableSet.copyOf(path),
+                Collections.emptySet())
+            : new PathBasedCredentialContext(
+                PrincipalUtils.getCurrentUserName(),
+                Collections.emptySet(),
+                ImmutableSet.copyOf(path));
     Credential credential = catalogCredentialManager.getCredential(context);
     if (credential == null) {
       throw new ServiceUnavailableException("Couldn't generate credential, %s", context);
     }
+    return credential;
+  }
 
+  @VisibleForTesting
+  protected boolean shouldGenerateCredential(
+      LoadTableResponse loadTableResponse, boolean requestCredential) {
+    if (!requestCredential) {
+      return false;
+    }
+
+    // RESTCatalog will fetch credential from the remote catalog instead of generating credential
+    if (getCatalog() instanceof RESTCatalog) {
+      return false;
+    }
+
+    validateCredentialLocation(loadTableResponse.tableMetadata().location());
+    return !isLocalOrHdfsTable(loadTableResponse.tableMetadata());
+  }
+
+  private boolean isLocalOrHdfsTable(TableMetadata tableMetadata) {
+    return isLocalOrHdfsLocation(tableMetadata.location());
+  }
+
+  @VisibleForTesting
+  static void validateCredentialLocation(String location) {
+    if (StringUtils.isBlank(location)) {
+      throw new IllegalArgumentException(
+          "Table location cannot be null or blank when requesting credentials");
+    }
+  }
+
+  @VisibleForTesting
+  static boolean isLocalOrHdfsLocation(String location) {
+    // Precondition: location is non-blank (enforced by caller).
+    if (StringUtils.isBlank(location)) {
+      return false;
+    }
+    URI uri;
+    try {
+      uri = URI.create(location);
+    } catch (IllegalArgumentException e) {
+      return false;
+    }
+    String scheme = uri.getScheme();
+    if (scheme == null) {
+      // No scheme means a local path.
+      return true;
+    }
+    return "file".equalsIgnoreCase(scheme) || "hdfs".equalsIgnoreCase(scheme);
+  }
+
+  /**
+   * Plan table scan and return scan tasks.
+   *
+   * <p>This method performs server-side scan planning to optimize query performance by reducing
+   * client-side metadata loading and enabling parallel task execution.
+   *
+   * <p>Implementation uses synchronous scan planning (COMPLETED status) where tasks are returned
+   * immediately as serialized JSON strings. This is different from asynchronous mode (SUBMITTED
+   * status) where a plan ID is returned for later retrieval.
+   *
+   * <p>Referenced from Iceberg PR #13400 for scan planning implementation.
+   *
+   * @param tableIdentifier The table identifier.
+   * @param scanRequest The scan request parameters including filters, projections, snapshot-id,
+   *     etc.
+   * @return PlanTableScanResponse with status=COMPLETED and serialized planTasks.
+   * @throws IllegalArgumentException if scan request validation fails
+   * @throws org.apache.gravitino.exceptions.NoSuchTableException if table doesn't exist
+   * @throws RuntimeException for other scan planning failures
+   */
+  public PlanTableScanResponse planTableScan(
+      TableIdentifier tableIdentifier, PlanTableScanRequest scanRequest) {
+
+    LOG.debug(
+        "Planning scan for table: {}, snapshotId: {}, startSnapshotId: {}, endSnapshotId: {}, select: {}, caseSensitive: {}",
+        tableIdentifier,
+        scanRequest.snapshotId(),
+        scanRequest.startSnapshotId(),
+        scanRequest.endSnapshotId(),
+        scanRequest.select(),
+        scanRequest.caseSensitive());
+
+    try {
+      Table table = getCatalog().loadTable(tableIdentifier);
+      Optional<PlanTableScanResponse> cachedResponse =
+          scanPlanCache.get(ScanPlanCacheKey.create(tableIdentifier, table, scanRequest));
+      if (cachedResponse.isPresent()) {
+        LOG.info("Using cached scan plan for table: {}", tableIdentifier);
+        return cachedResponse.get();
+      }
+
+      List<String> planTasks = new ArrayList<>();
+      Map<Integer, PartitionSpec> specsById = new HashMap<>();
+      List<DeleteFile> deleteFiles = new ArrayList<>();
+
+      try (CloseableIterable<FileScanTask> fileScanTasks =
+          createFilePlanScanTasks(table, tableIdentifier, scanRequest)) {
+        for (FileScanTask fileScanTask : fileScanTasks) {
+          try {
+            String taskString = ScanTaskParser.toJson(fileScanTask);
+            planTasks.add(taskString);
+
+            int specId = fileScanTask.spec().specId();
+            if (!specsById.containsKey(specId)) {
+              specsById.put(specId, fileScanTask.spec());
+            }
+
+            if (!fileScanTask.deletes().isEmpty()) {
+              deleteFiles.addAll(fileScanTask.deletes());
+            }
+          } catch (Exception e) {
+            throw new RuntimeException(
+                String.format(
+                    "Failed to serialize scan task for table: %s. Error: %s",
+                    tableIdentifier, e.getMessage()),
+                e);
+          }
+        }
+      } catch (IOException e) {
+        LOG.error("Failed to close scan task iterator for table: {}", tableIdentifier, e);
+        throw new RuntimeException("Failed to plan scan tasks: " + e.getMessage(), e);
+      }
+
+      List<DeleteFile> uniqueDeleteFiles =
+          deleteFiles.stream().distinct().collect(Collectors.toList());
+
+      if (planTasks.isEmpty()) {
+        LOG.info(
+            "Scan planning returned no tasks for table: {}. Table may be empty or fully filtered.",
+            tableIdentifier);
+      }
+
+      PlanTableScanResponse.Builder responseBuilder =
+          PlanTableScanResponse.builder()
+              .withPlanStatus(PlanStatus.COMPLETED)
+              .withPlanTasks(planTasks)
+              .withSpecsById(specsById);
+
+      if (!uniqueDeleteFiles.isEmpty()) {
+        responseBuilder.withDeleteFiles(uniqueDeleteFiles);
+        LOG.debug(
+            "Included {} delete files in scan plan for table: {}",
+            uniqueDeleteFiles.size(),
+            tableIdentifier);
+      }
+
+      PlanTableScanResponse response = responseBuilder.build();
+
+      // Cache the scan plan response
+      scanPlanCache.put(ScanPlanCacheKey.create(tableIdentifier, table, scanRequest), response);
+      return response;
+
+    } catch (IllegalArgumentException e) {
+      LOG.error("Invalid scan request for table {}: {}", tableIdentifier, e.getMessage());
+      throw new IllegalArgumentException("Invalid scan parameters: " + e.getMessage(), e);
+    } catch (org.apache.iceberg.exceptions.NoSuchTableException e) {
+      LOG.error("Table not found during scan planning: {}", tableIdentifier);
+      throw e;
+    } catch (Exception e) {
+      LOG.error("Unexpected error during scan planning for table: {}", tableIdentifier, e);
+      throw new RuntimeException(
+          "Scan planning failed for table " + tableIdentifier + ": " + e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Create and plan a scan based on the scan request.
+   *
+   * <p>If both start and end snapshot IDs are provided, uses IncrementalAppendScan. Otherwise, uses
+   * regular TableScan.
+   *
+   * @param table The table to scan
+   * @param tableIdentifier The table identifier for logging
+   * @param scanRequest The scan request parameters
+   * @return CloseableIterable of FileScanTask
+   */
+  private CloseableIterable<FileScanTask> createFilePlanScanTasks(
+      Table table, TableIdentifier tableIdentifier, PlanTableScanRequest scanRequest) {
+    Long startSnapshotId = scanRequest.startSnapshotId();
+    Long endSnapshotId = scanRequest.endSnapshotId();
+    // Use IncrementalAppendScan if both start and end snapshot IDs are provided
+    if (startSnapshotId != null && endSnapshotId != null) {
+      LOG.debug(
+          "Using IncrementalAppendScan for table: {}, from snapshot: {} to snapshot: {}",
+          tableIdentifier,
+          startSnapshotId,
+          endSnapshotId);
+      IncrementalAppendScan incrementalScan =
+          table
+              .newIncrementalAppendScan()
+              .fromSnapshotInclusive(startSnapshotId)
+              .toSnapshot(endSnapshotId);
+      incrementalScan = applyScanRequest(incrementalScan, scanRequest);
+      return incrementalScan.planFiles();
+    } else {
+      TableScan tableScan = table.newScan();
+      // Snapshot ID 0 has no special meaning in Iceberg, so we only apply if not null
+      if (scanRequest.snapshotId() != null) {
+        tableScan = tableScan.useSnapshot(scanRequest.snapshotId());
+        LOG.debug("Applied snapshot filter: snapshot-id={}", scanRequest.snapshotId());
+      }
+      tableScan = applyScanRequest(tableScan, scanRequest);
+      return tableScan.planFiles();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T extends Scan> T applyScanRequest(T scan, PlanTableScanRequest scanRequest) {
+    scan = (T) scan.caseSensitive(scanRequest.caseSensitive());
+    LOG.debug("Applied case-sensitive: {}", scanRequest.caseSensitive());
+    scan = applyScanFilter(scan, scanRequest);
+    scan = applyScanSelect(scan, scanRequest);
+    scan = applyScanStatsFields(scan, scanRequest);
+
+    return scan;
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T extends Scan> T applyScanFilter(T scan, PlanTableScanRequest scanRequest) {
+    if (scanRequest.filter() != null) {
+      try {
+        scan = (T) scan.filter(scanRequest.filter());
+        LOG.debug("Applied filter expression: {}", scanRequest.filter());
+      } catch (Exception e) {
+        LOG.error("Failed to apply filter expression: {}", e.getMessage(), e);
+        throw new IllegalArgumentException("Invalid filter expression: " + e.getMessage(), e);
+      }
+    }
+    return scan;
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T extends Scan> T applyScanSelect(T scan, PlanTableScanRequest scanRequest) {
+    if (scanRequest.select() != null && !scanRequest.select().isEmpty()) {
+      try {
+        scan = (T) scan.select(scanRequest.select());
+        LOG.debug("Applied column projection: {}", scanRequest.select());
+      } catch (Exception e) {
+        LOG.error("Failed to apply column projection: {}", e.getMessage(), e);
+        throw new IllegalArgumentException("Invalid column selection: " + e.getMessage(), e);
+      }
+    }
+    return scan;
+  }
+
+  @SuppressWarnings("unchecked")
+  private <T extends Scan> T applyScanStatsFields(T scan, PlanTableScanRequest scanRequest) {
+    if (scanRequest.statsFields() != null && !scanRequest.statsFields().isEmpty()) {
+      try {
+        scan = (T) scan.includeColumnStats(scanRequest.statsFields());
+        LOG.debug("Applied statistics fields: {}", scanRequest.statsFields());
+      } catch (Exception e) {
+        LOG.error("Failed to apply statistics fields: {}", e.getMessage(), e);
+        throw new IllegalArgumentException("Invalid statistics fields: " + e.getMessage(), e);
+      }
+    }
+    return scan;
+  }
+
+  private ScanPlanCache loadScanPlanCache(IcebergConfig config) {
+    String impl = config.get(IcebergConfig.SCAN_PLAN_CACHE_IMPL);
+    if (StringUtils.isBlank(impl)) {
+      return ScanPlanCache.DUMMY;
+    }
+
+    ScanPlanCache cache =
+        ClassUtils.loadAndGetInstance(impl, Thread.currentThread().getContextClassLoader());
+    int capacity = config.get(IcebergConfig.SCAN_PLAN_CACHE_CAPACITY);
+    int expireMinutes = config.get(IcebergConfig.SCAN_PLAN_CACHE_EXPIRE_MINUTES);
+    cache.initialize(capacity, expireMinutes);
     LOG.info(
-        "Generate credential: {} for Iceberg table: {}",
-        credential.credentialType(),
-        tableIdentifier);
-
-    Map<String, String> credentialConfig = CredentialPropertyUtils.toIcebergProperties(credential);
-    return LoadTableResponse.builder()
-        .withTableMetadata(loadTableResponse.tableMetadata())
-        .addAllConfig(loadTableResponse.config())
-        .addAllConfig(getCatalogConfigToClient())
-        .addAllConfig(credentialConfig)
-        .build();
+        "Load scan plan cache, backend: {}, impl: {}, capacity: {}, expire minutes: {}",
+        config.get(IcebergConfig.CATALOG_BACKEND),
+        impl,
+        capacity,
+        expireMinutes);
+    return cache;
   }
 
   @VisibleForTesting
@@ -168,5 +655,108 @@ public class CatalogWrapperForREST extends IcebergCatalogWrapper {
       properties.remove(deprecatedProperty);
       properties.put(newProperty, deprecatedValue);
     }
+  }
+
+  private LoadTableResponse createTableInternal(Namespace namespace, CreateTableRequest request) {
+    Catalog loadedCatalog = getCatalog();
+
+    request.validate();
+
+    if (request.stageCreate()) {
+      return stageTableCreateInternal(namespace, request);
+    }
+
+    TableIdentifier ident = TableIdentifier.of(namespace, request.name());
+    Table table =
+        loadedCatalog
+            .buildTable(ident, request.schema())
+            .withLocation(request.location())
+            .withPartitionSpec(request.spec())
+            .withSortOrder(request.writeOrder())
+            .withProperties(request.properties())
+            .create();
+
+    if (table instanceof BaseTable) {
+      Map<String, String> properties = retrieveFileIOProperties(table.io());
+      return LoadTableResponse.builder()
+          .withTableMetadata(((BaseTable) table).operations().current())
+          .addAllConfig(
+              MapUtils.getFilteredMap(
+                  properties, key -> catalogPropertiesToClientKeys.contains(key)))
+          // Keep only credential fields from FileIO properties before returning them to the client.
+          .addAllConfig(CredentialPropertyUtils.filterCredentialProperties(properties))
+          .build();
+    }
+
+    throw new IllegalStateException("Cannot wrap catalog that does not produce BaseTable");
+  }
+
+  private LoadTableResponse stageTableCreateInternal(
+      Namespace namespace, CreateTableRequest request) {
+    Catalog loadedCatalog = getCatalog();
+    TableIdentifier ident = TableIdentifier.of(namespace, request.name());
+    if (loadedCatalog.tableExists(ident)) {
+      throw new AlreadyExistsException("Table already exists: %s", ident);
+    }
+
+    Map<String, String> properties = Maps.newHashMap();
+    properties.put("created-at", OffsetDateTime.now(ZoneOffset.UTC).toString());
+    properties.putAll(request.properties());
+
+    Map<String, String> config = Maps.newHashMap();
+    Catalog.TableBuilder tableBuilder =
+        loadedCatalog
+            .buildTable(ident, request.schema())
+            .withPartitionSpec(request.spec())
+            .withSortOrder(request.writeOrder())
+            .withProperties(properties);
+
+    Table table;
+    if (request.location() != null) {
+      table = tableBuilder.withLocation(request.location()).createTransaction().table();
+    } else {
+      table = tableBuilder.createTransaction().table();
+    }
+
+    Map<String, String> tableProperties = retrieveFileIOProperties(table.io());
+    config.putAll(
+        MapUtils.getFilteredMap(
+            tableProperties, key -> catalogPropertiesToClientKeys.contains(key)));
+    config.putAll(CredentialPropertyUtils.filterCredentialProperties(tableProperties));
+
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            request.schema(),
+            request.spec() != null ? request.spec() : PartitionSpec.unpartitioned(),
+            request.writeOrder() != null ? request.writeOrder() : SortOrder.unsorted(),
+            table.location(),
+            properties);
+
+    return LoadTableResponse.builder().withTableMetadata(metadata).addAllConfig(config).build();
+  }
+
+  private LoadTableResponse loadTableInternal(TableIdentifier ident) {
+    Table table = getCatalog().loadTable(ident);
+
+    if (table instanceof BaseTable) {
+      Map<String, String> properties = retrieveFileIOProperties(table.io());
+      return LoadTableResponse.builder()
+          .withTableMetadata(((BaseTable) table).operations().current())
+          .addAllConfig(
+              MapUtils.getFilteredMap(
+                  properties, key -> catalogPropertiesToClientKeys.contains(key)))
+          // Keep only credential fields from FileIO properties before returning them to the client.
+          .addAllConfig(CredentialPropertyUtils.filterCredentialProperties(properties))
+          .build();
+    } else if (table instanceof BaseMetadataTable) {
+      // metadata tables are loaded on the client side, return NoSuchTableException for now
+      throw new NoSuchTableException("Table does not exist: %s", ident.toString());
+    }
+
+    throw new IllegalStateException("Cannot wrap catalog that does not produce BaseTable");
+  }
+
+  private static Map<String, String> retrieveFileIOProperties(FileIO fileIO) {
+    return fileIO instanceof InMemoryFileIO ? Maps.newHashMap() : fileIO.properties();
   }
 }

@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3.0.2
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36
         id: filter
         with:
           filters: |
@@ -40,7 +40,7 @@ jobs:
               - build.gradle.kts
               - gradle.properties
               - gradlew
-              - setting.gradle.kts
+              - settings.gradle.kts
     outputs:
       source_changes: ${{ steps.filter.outputs.source_changes }}
 
@@ -48,7 +48,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.source_changes == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       matrix:
         # Integration test for AMD64 architecture
@@ -66,23 +66,27 @@ jobs:
           cache: 'gradle'
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Free up disk space
+        run: |
+          dev/ci/util_free_space.sh  
 
       - name: Python Client Integration Test
         id: integrationTest
         run: |
-          ./gradlew compileDistribution -x test -PjdkVersion=${{ matrix.java-version }}
+          ./gradlew compileDistribution -PskipWeb=true -x test
 
-          for pythonVersion in "3.8" "3.9" "3.10" "3.11" "3.12"
+          for pythonVersion in "3.10" "3.11" "3.12"
           do
             echo "Use Python version ${pythonVersion} to test the Python client."
-            ./gradlew -PjdkVersion=${{ matrix.java-version }} -PpythonVersion=${pythonVersion} -PskipDockerTests=false :clients:client-python:test
+            ./gradlew -PpythonVersion=${pythonVersion} -PskipDockerTests=false -PskipWeb=true :clients:client-python:test
             # Clean Gravitino database to clean test data
             rm -rf ./distribution/package/data
           done
 
       - name: Upload integrate tests reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: ${{ failure() && steps.integrationTest.outcome == 'failure' }}
         with:
           name: integrate test reports

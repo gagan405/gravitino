@@ -1,0 +1,214 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.gravitino.catalog;
+
+import static org.apache.gravitino.utils.NameIdentifierUtil.getCatalogIdentifier;
+
+import java.io.IOException;
+import java.util.Map;
+import javax.annotation.Nullable;
+import org.apache.gravitino.Audit;
+import org.apache.gravitino.Entity;
+import org.apache.gravitino.EntityStore;
+import org.apache.gravitino.GravitinoEnv;
+import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.Namespace;
+import org.apache.gravitino.exceptions.NoSuchEntityException;
+import org.apache.gravitino.exceptions.NoSuchViewException;
+import org.apache.gravitino.lock.LockType;
+import org.apache.gravitino.lock.TreeLockUtils;
+import org.apache.gravitino.meta.AuditInfo;
+import org.apache.gravitino.meta.ViewEntity;
+import org.apache.gravitino.rel.Column;
+import org.apache.gravitino.rel.Representation;
+import org.apache.gravitino.rel.View;
+import org.apache.gravitino.rel.ViewChange;
+import org.apache.gravitino.storage.IdGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * {@code ViewOperationDispatcher} is the operation dispatcher for view operations.
+ *
+ * <p>Currently only supports loadView() with EntityStore auto-import. Full CRUD operations
+ * (listViews, createView, alterView, dropView) will be implemented in a follow-up PR.
+ */
+public class ViewOperationDispatcher extends OperationDispatcher implements ViewDispatcher {
+
+  private static final Logger LOG = LoggerFactory.getLogger(ViewOperationDispatcher.class);
+
+  /**
+   * Creates a new ViewOperationDispatcher instance.
+   *
+   * @param catalogManager The CatalogManager instance to be used for view operations.
+   * @param store The EntityStore instance to be used for view operations.
+   * @param idGenerator The IdGenerator instance to be used for view operations.
+   */
+  public ViewOperationDispatcher(
+      CatalogManager catalogManager, EntityStore store, IdGenerator idGenerator) {
+    super(catalogManager, store, idGenerator);
+  }
+
+  /**
+   * Load view metadata by identifier from the catalog.
+   *
+   * <p>This method first checks if the view exists in Gravitino's EntityStore. If not found, it
+   * loads from the catalog and auto-imports into EntityStore.
+   *
+   * @param ident The view identifier.
+   * @return The loaded view metadata.
+   * @throws NoSuchViewException If the view does not exist.
+   */
+  @Override
+  public View loadView(NameIdentifier ident) throws NoSuchViewException {
+    LOG.info("Loading view: {}", ident);
+
+    // First load with READ lock to check if view is already imported
+    EntityCombinedView entityCombinedView =
+        TreeLockUtils.doWithTreeLock(ident, LockType.READ, () -> internalLoadView(ident));
+
+    if (!entityCombinedView.imported()) {
+      // Load the schema to make sure the schema is imported.
+      SchemaDispatcher schemaDispatcher = GravitinoEnv.getInstance().schemaDispatcher();
+      NameIdentifier schemaIdent = NameIdentifier.of(ident.namespace().levels());
+      schemaDispatcher.loadSchema(schemaIdent);
+
+      // Import the view.
+      entityCombinedView =
+          TreeLockUtils.doWithTreeLock(schemaIdent, LockType.WRITE, () -> importView(ident));
+    }
+
+    return entityCombinedView;
+  }
+
+  @Override
+  public NameIdentifier[] listViews(Namespace namespace) {
+    throw new UnsupportedOperationException("Listing views is not supported yet");
+  }
+
+  @Override
+  public boolean dropView(NameIdentifier ident) {
+    throw new UnsupportedOperationException("Dropping a view is not supported yet");
+  }
+
+  @Override
+  public View createView(
+      NameIdentifier ident,
+      String comment,
+      Column[] columns,
+      Representation[] representations,
+      @Nullable String defaultCatalog,
+      @Nullable String defaultSchema,
+      Map<String, String> properties) {
+    throw new UnsupportedOperationException("Creating a view is not supported yet");
+  }
+
+  @Override
+  public View alterView(NameIdentifier ident, ViewChange... changes) {
+    throw new UnsupportedOperationException("Altering a view is not supported yet");
+  }
+
+  /**
+   * Internal method to load view and check if it exists in entity store.
+   *
+   * @param ident The view identifier.
+   * @return EntityCombinedView containing the view and import status.
+   * @throws NoSuchViewException If the view does not exist.
+   */
+  private EntityCombinedView internalLoadView(NameIdentifier ident) throws NoSuchViewException {
+    // Load view from the underlying catalog
+    View catalogView =
+        doWithCatalog(
+            getCatalogIdentifier(ident),
+            c -> c.doWithViewOps(v -> v.loadView(ident)),
+            NoSuchViewException.class);
+
+    // Check if view exists in entity store
+    try {
+      ViewEntity viewEntity = store.get(ident, Entity.EntityType.VIEW, ViewEntity.class);
+      return EntityCombinedView.of(catalogView, viewEntity).withImported(true);
+    } catch (NoSuchEntityException e) {
+      // View not in store yet
+      LOG.debug("View {} not found in entity store", ident);
+      return EntityCombinedView.of(catalogView).withImported(false);
+    } catch (IOException ioe) {
+      LOG.warn("Failed to check if view {} exists in entity store", ident, ioe);
+      return EntityCombinedView.of(catalogView).withImported(false);
+    }
+  }
+
+  /**
+   * Import view into Gravitino entity store.
+   *
+   * @param ident The view identifier.
+   * @return EntityCombinedView containing the view and import status.
+   * @throws NoSuchViewException If the view does not exist.
+   */
+  private EntityCombinedView importView(NameIdentifier ident) throws NoSuchViewException {
+    // Double-check if already imported (another thread might have imported between locks)
+    EntityCombinedView entityCombinedView = internalLoadView(ident);
+
+    if (entityCombinedView.imported()) {
+      return entityCombinedView;
+    }
+
+    LOG.info("Auto-importing view {} into Gravitino entity store", ident);
+    long uid = idGenerator.nextId();
+    View catalogView = entityCombinedView.viewFromCatalog();
+    ViewEntity newViewEntity = buildViewEntityForImport(uid, ident, catalogView);
+    try {
+      store.put(newViewEntity, false /* overwrite */);
+      LOG.info("Successfully imported view {} into entity store with id {}", ident, uid);
+      return EntityCombinedView.of(catalogView, newViewEntity).withImported(true);
+    } catch (Exception e) {
+      // Log but don't fail - view import is best-effort
+      LOG.warn("Failed to import view {} into entity store: {}", ident, e.getMessage());
+      return EntityCombinedView.of(catalogView).withImported(false);
+    }
+  }
+
+  private ViewEntity buildViewEntityForImport(Long uid, NameIdentifier ident, View view) {
+    return ViewEntity.builder()
+        .withId(uid)
+        .withName(ident.name())
+        .withNamespace(ident.namespace())
+        .withComment(view.comment())
+        .withColumns(view.columns() == null ? new Column[0] : view.columns())
+        .withRepresentations(
+            view.representations() == null ? new Representation[0] : view.representations())
+        .withDefaultCatalog(view.defaultCatalog())
+        .withDefaultSchema(view.defaultSchema())
+        .withProperties(view.properties())
+        .withAuditInfo(toAuditInfo(view.auditInfo()))
+        .build();
+  }
+
+  private AuditInfo toAuditInfo(Audit audit) {
+    if (audit == null) {
+      return AuditInfo.EMPTY;
+    }
+
+    return AuditInfo.builder()
+        .withCreator(audit.creator())
+        .withCreateTime(audit.createTime())
+        .withLastModifier(audit.lastModifier())
+        .withLastModifiedTime(audit.lastModifiedTime())
+        .build();
+  }
+}

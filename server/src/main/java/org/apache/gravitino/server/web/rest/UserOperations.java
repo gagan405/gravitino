@@ -20,8 +20,6 @@ package org.apache.gravitino.server.web.rest;
 
 import com.codahale.metrics.annotation.ResponseMetered;
 import com.codahale.metrics.annotation.Timed;
-import java.util.Arrays;
-import java.util.stream.Collectors;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.DELETE;
 import javax.ws.rs.DefaultValue;
@@ -35,8 +33,11 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import org.apache.gravitino.Entity;
 import org.apache.gravitino.GravitinoEnv;
-import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.MetadataObjects;
 import org.apache.gravitino.authorization.AccessControlDispatcher;
+import org.apache.gravitino.authorization.Owner;
+import org.apache.gravitino.authorization.OwnerDispatcher;
 import org.apache.gravitino.authorization.User;
 import org.apache.gravitino.dto.requests.UserAddRequest;
 import org.apache.gravitino.dto.responses.NameListResponse;
@@ -44,8 +45,9 @@ import org.apache.gravitino.dto.responses.RemoveResponse;
 import org.apache.gravitino.dto.responses.UserListResponse;
 import org.apache.gravitino.dto.responses.UserResponse;
 import org.apache.gravitino.dto.util.DTOConverters;
+import org.apache.gravitino.metalake.MetalakeManager;
 import org.apache.gravitino.metrics.MetricNames;
-import org.apache.gravitino.server.authorization.MetadataFilterHelper;
+import org.apache.gravitino.server.authorization.MetadataAuthzHelper;
 import org.apache.gravitino.server.authorization.NameBindings;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationExpression;
 import org.apache.gravitino.server.authorization.annotations.AuthorizationMetadata;
@@ -60,7 +62,11 @@ public class UserOperations {
 
   private static final Logger LOG = LoggerFactory.getLogger(UserOperations.class);
 
+  private static final String LOAD_USER_PRIVILEGE =
+      "METALAKE::OWNER || METALAKE::MANAGE_USERS || USER::SELF";
+
   private final AccessControlDispatcher accessControlManager;
+  private final OwnerDispatcher ownerManager;
 
   @Context private HttpServletRequest httpRequest;
 
@@ -69,6 +75,7 @@ public class UserOperations {
     // and Jersey injection doesn't support null value. So UserOperations chooses to retrieve
     // accessControlManager from GravitinoEnv instead of injection here.
     this.accessControlManager = GravitinoEnv.getInstance().accessControlDispatcher();
+    this.ownerManager = GravitinoEnv.getInstance().ownerDispatcher();
   }
 
   @GET
@@ -76,7 +83,7 @@ public class UserOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "get-user." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "get-user", absolute = true)
-  @AuthorizationExpression(expression = "METALAKE::OWNER || MATALAKE::MANAGE_USERS || USER::SELF")
+  @AuthorizationExpression(expression = LOAD_USER_PRIVILEGE)
   public Response getUser(
       @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
           String metalake,
@@ -84,10 +91,12 @@ public class UserOperations {
     try {
       return Utils.doAs(
           httpRequest,
-          () ->
-              Utils.ok(
-                  new UserResponse(
-                      DTOConverters.toDTO(accessControlManager.getUser(metalake, user)))));
+          () -> {
+            MetalakeManager.checkMetalakeInUse(metalake);
+            return Utils.ok(
+                new UserResponse(
+                    DTOConverters.toDTO(accessControlManager.getUser(metalake, user))));
+          });
     } catch (Exception e) {
       return ExceptionHandlers.handleUserException(OperationType.GET, user, metalake, e);
     }
@@ -97,36 +106,37 @@ public class UserOperations {
   @Produces("application/vnd.gravitino.v1+json")
   @Timed(name = "list-user." + MetricNames.HTTP_PROCESS_DURATION, absolute = true)
   @ResponseMetered(name = "list-user", absolute = true)
+  @AuthorizationExpression(expression = "")
   public Response listUsers(
-      @PathParam("metalake") String metalake,
+      @PathParam("metalake") @AuthorizationMetadata(type = Entity.EntityType.METALAKE)
+          String metalake,
       @QueryParam("details") @DefaultValue("false") boolean verbose) {
     try {
       return Utils.doAs(
           httpRequest,
           () -> {
+            MetalakeManager.checkMetalakeInUse(metalake);
             if (verbose) {
               User[] users = accessControlManager.listUsers(metalake);
               users =
-                  Arrays.stream(users)
-                      .filter(
-                          user -> {
-                            NameIdentifier[] nameIdentifiers =
-                                new NameIdentifier[] {
-                                  NameIdentifierUtil.ofUser(metalake, user.name())
-                                };
-                            return MetadataFilterHelper.filterByExpression(
-                                        metalake,
-                                        "METALAKE::OWNER || MATALAKE::MANAGE_USERS || USER::SELF",
-                                        Entity.EntityType.USER,
-                                        nameIdentifiers)
-                                    .length
-                                > 0;
-                          })
-                      .collect(Collectors.toList())
-                      .toArray(new User[0]);
+                  MetadataAuthzHelper.filterByExpression(
+                      metalake,
+                      LOAD_USER_PRIVILEGE,
+                      Entity.EntityType.USER,
+                      users,
+                      (userEntity) -> NameIdentifierUtil.ofUser(metalake, userEntity.name()));
+
               return Utils.ok(new UserListResponse(DTOConverters.toDTOs(users)));
             } else {
-              return Utils.ok(new NameListResponse(accessControlManager.listUserNames(metalake)));
+              String[] users = accessControlManager.listUserNames(metalake);
+              users =
+                  MetadataAuthzHelper.filterByExpression(
+                      metalake,
+                      LOAD_USER_PRIVILEGE,
+                      Entity.EntityType.USER,
+                      users,
+                      (username) -> NameIdentifierUtil.ofUser(metalake, username));
+              return Utils.ok(new NameListResponse(users));
             }
           });
     } catch (Exception e) {
@@ -148,6 +158,7 @@ public class UserOperations {
           httpRequest,
           () -> {
             request.validate();
+            MetalakeManager.checkMetalakeInUse(metalake);
             return Utils.ok(
                 new UserResponse(
                     DTOConverters.toDTO(
@@ -173,6 +184,21 @@ public class UserOperations {
       return Utils.doAs(
           httpRequest,
           () -> {
+            MetalakeManager.checkMetalakeInUse(metalake);
+
+            ownerManager
+                .getOwner(
+                    metalake, MetadataObjects.of(null, metalake, MetadataObject.Type.METALAKE))
+                .ifPresent(
+                    owner -> {
+                      if (owner.type() == Owner.Type.USER && owner.name().equals(user)) {
+                        throw new IllegalArgumentException(
+                            String.format(
+                                "Cannot remove user %s from metalake %s because the user is the owner of the metalake.",
+                                user, metalake));
+                      }
+                    });
+
             boolean removed = accessControlManager.removeUser(metalake, user);
             if (!removed) {
               LOG.warn("Failed to remove user {} under metalake {}", user, metalake);

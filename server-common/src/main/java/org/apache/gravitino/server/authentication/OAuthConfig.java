@@ -20,6 +20,7 @@
 package org.apache.gravitino.server.authentication;
 
 import io.jsonwebtoken.SignatureAlgorithm;
+import java.util.List;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.config.ConfigBuilder;
 import org.apache.gravitino.config.ConfigConstants;
@@ -60,30 +61,48 @@ public interface OAuthConfig {
 
   ConfigEntry<String> DEFAULT_SERVER_URI =
       new ConfigBuilder(OAUTH_CONFIG_PREFIX + "serverUri")
-          .doc("The uri of the default OAuth server")
+          .doc(
+              "The uri of the default OAuth server. Required when using StaticSignKeyValidator, not required for JWKS-based validators")
           .version(ConfigConstants.VERSION_0_3_0)
           .stringConf()
-          .checkValue(StringUtils::isNotBlank, ConfigConstants.NOT_BLANK_ERROR_MSG)
           .create();
 
   ConfigEntry<String> DEFAULT_TOKEN_PATH =
       new ConfigBuilder(OAUTH_CONFIG_PREFIX + "tokenPath")
-          .doc("The path for token of the default OAuth server")
+          .doc(
+              "The path for token of the default OAuth server. Required when using StaticSignKeyValidator, not required for JWKS-based validators")
           .version(ConfigConstants.VERSION_0_3_0)
           .stringConf()
-          .checkValue(StringUtils::isNotBlank, ConfigConstants.NOT_BLANK_ERROR_MSG)
           .create();
 
   // OAuth provider configs
   ConfigEntry<String> PROVIDER =
       new ConfigBuilder(OAUTH_CONFIG_PREFIX + "provider")
-          .doc("The OAuth provider to use (e.g., azure)")
+          .doc(
+              "The OAuth provider to use. This will be used in the Gravitino Web UI to determine the authentication flow.")
           .version(ConfigConstants.VERSION_1_0_0)
           .stringConf()
-          .create();
+          .checkValue(
+              value -> {
+                if (value == null) return false;
+                for (ProviderType type : ProviderType.values()) {
+                  if (type.name().equalsIgnoreCase(value)) {
+                    return true;
+                  }
+                }
+                return false;
+              },
+              "Invalid OAuth provider type. Supported values: '"
+                  + String.join(
+                      ", ",
+                      java.util.Arrays.stream(ProviderType.values())
+                          .map(v -> v.name().toLowerCase())
+                          .toArray(String[]::new))
+                  + "'")
+          .createWithDefault(ProviderType.DEFAULT.name().toLowerCase());
 
   ConfigEntry<String> CLIENT_ID =
-      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "client-id")
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "clientId")
           .doc("OAuth client ID used for Web UI authentication")
           .version(ConfigConstants.VERSION_1_0_0)
           .stringConf()
@@ -91,22 +110,91 @@ public interface OAuthConfig {
 
   ConfigEntry<String> AUTHORITY =
       new ConfigBuilder(OAUTH_CONFIG_PREFIX + "authority")
-          .doc("OAuth authority URL (authorization server)")
+          .doc("OAuth authority URL (authorization server) used for Web UI authentication")
           .version(ConfigConstants.VERSION_1_0_0)
           .stringConf()
           .create();
 
   ConfigEntry<String> SCOPE =
       new ConfigBuilder(OAUTH_CONFIG_PREFIX + "scope")
-          .doc("OAuth scopes (space-separated)")
+          .doc("OAuth scopes (space-separated) used for Web UI authentication")
           .version(ConfigConstants.VERSION_1_0_0)
           .stringConf()
           .create();
 
   ConfigEntry<String> JWKS_URI =
-      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "jwks-uri")
-          .doc("JWKS URI for token validation")
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "jwksUri")
+          .doc("JWKS URI used for server-side OAuth token validation")
           .version(ConfigConstants.VERSION_1_0_0)
           .stringConf()
           .create();
+
+  ConfigEntry<List<String>> PRINCIPAL_FIELDS =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "principalFields")
+          .doc(
+              "JWT claim field(s) to use as principal identity. Comma-separated list for fallback in order (e.g., 'preferred_username,email,sub').")
+          .version(ConfigConstants.VERSION_1_0_0)
+          .stringConf()
+          .toSequence()
+          .createWithDefault(java.util.Arrays.asList("sub"));
+
+  ConfigEntry<List<String>> GROUPS_FIELDS =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "groupsFields")
+          .doc(
+              "JWT claim field(s) to use as groups. Comma-separated list for fallback in order (e.g., 'groups,roles').")
+          .version(ConfigConstants.VERSION_1_3_0)
+          .stringConf()
+          .toSequence()
+          .createWithDefault(java.util.Arrays.asList("groups"));
+
+  ConfigEntry<String> TOKEN_VALIDATOR_CLASS =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "tokenValidatorClass")
+          .doc("Fully qualified class name of the OAuth token validator implementation")
+          .version(ConfigConstants.VERSION_1_0_0)
+          .stringConf()
+          .createWithDefault("org.apache.gravitino.server.authentication.StaticSignKeyValidator");
+
+  ConfigEntry<String> PRINCIPAL_MAPPER =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "principalMapper")
+          .doc(
+              "Type of principal mapper to use for OAuth/JWT principals. "
+                  + "Built-in value: 'regex' (uses regex pattern to extract username). "
+                  + "Default pattern '^(.*)$' keeps the principal unchanged. "
+                  + "Can also be a fully qualified class name implementing PrincipalMapper for custom logic.")
+          .version(ConfigConstants.VERSION_1_2_0)
+          .stringConf()
+          .createWithDefault("regex");
+
+  ConfigEntry<String> PRINCIPAL_MAPPER_REGEX_PATTERN =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "principalMapper.regex.pattern")
+          .doc(
+              "Regex pattern to extract the username from the OAuth principal field. "
+                  + "Only used when principalMapper is 'regex'. "
+                  + "The pattern should contain at least one capturing group. "
+                  + "Default pattern '^(.*)$' matches the entire principal.")
+          .version(ConfigConstants.VERSION_1_2_0)
+          .stringConf()
+          .createWithDefault("^(.*)$");
+
+  ConfigEntry<String> GROUP_MAPPER =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "groupMapper")
+          .doc(
+              "Type of group mapper to use for OAuth/JWT groups. "
+                  + "Built-in value: 'regex' (uses regex pattern to extract group). "
+                  + "Default pattern '^(.*)$' keeps the group unchanged. "
+                  + "Can also be a fully qualified class name implementing GroupMapper for custom logic.")
+          .version(ConfigConstants.VERSION_1_3_0)
+          .stringConf()
+          .createWithDefault("regex");
+
+  ConfigEntry<String> GROUP_MAPPER_REGEX_PATTERN =
+      new ConfigBuilder(OAUTH_CONFIG_PREFIX + "groupMapper.regex.pattern")
+          .doc(
+              "Regex pattern to extract the group from the OAuth group field. "
+                  + "Only used when groupMapper is 'regex'. "
+                  + "The pattern should contain at least one capturing group. "
+                  + "Default pattern '^(.*)$' matches the entire group.")
+          .version(ConfigConstants.VERSION_1_3_0)
+          .stringConf()
+          .createWithDefault("^(.*)$");
 }

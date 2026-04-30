@@ -27,22 +27,30 @@ val scalaVersion: String = gradle.startParameter.projectProperties["scalaVersion
 
 include("api", "common", "core", "server", "server-common")
 include("catalogs:catalog-common")
+include("catalogs:catalog-glue")
 include("catalogs:catalog-hive")
 include("catalogs:hive-metastore-common")
+include("catalogs:hive-metastore2-libs", "catalogs:hive-metastore3-libs")
 include("catalogs:catalog-lakehouse-iceberg")
 include("catalogs:catalog-lakehouse-paimon")
 include("catalogs:catalog-lakehouse-hudi")
+include("catalogs:catalog-lakehouse-generic")
 include(
   "catalogs:catalog-jdbc-common",
   "catalogs:catalog-jdbc-doris",
   "catalogs:catalog-jdbc-mysql",
   "catalogs:catalog-jdbc-postgresql",
-  "catalogs:catalog-jdbc-oceanbase",
   "catalogs:catalog-jdbc-starrocks"
 )
+
 include("catalogs:catalog-fileset")
 include("catalogs:catalog-kafka")
 include("catalogs:catalog-model")
+
+include("catalogs-contrib:catalog-jdbc-clickhouse")
+include("catalogs-contrib:catalog-jdbc-hologres")
+include("catalogs-contrib:catalog-jdbc-oceanbase")
+
 include(
   "clients:client-java",
   "clients:client-java-runtime",
@@ -58,29 +66,53 @@ if (gradle.startParameter.projectProperties["enableFuse"]?.toBoolean() == true) 
 }
 include("iceberg:iceberg-common")
 include("iceberg:iceberg-rest-server")
+include("lance:lance-common")
+include("lance:lance-rest-server")
 include("authorizations:authorization-ranger", "authorizations:authorization-common", "authorizations:authorization-chain")
-include("trino-connector:trino-connector", "trino-connector:integration-test")
+val skipTrinoConnector: Boolean =
+  gradle.startParameter.projectProperties["skipTrinoConnector"]?.toBoolean() ?: false
+if (!skipTrinoConnector) {
+  include(
+    "trino-connector:trino-connector",
+    "trino-connector:trino-connector-435-439",
+    "trino-connector:trino-connector-440-445",
+    "trino-connector:trino-connector-446-451",
+    "trino-connector:trino-connector-452-468",
+    "trino-connector:trino-connector-469-472",
+    "trino-connector:trino-connector-473-478",
+    "trino-connector:integration-test"
+  )
+} else {
+  println("Skipping trino-connector modules since skipTrinoConnector is set to true")
+}
 include("spark-connector:spark-common")
-// kyuubi hive connector doesn't support 2.13 for Spark3.3
 if (scalaVersion == "2.12") {
-  include("spark-connector:spark-3.3", "spark-connector:spark-runtime-3.3")
-  project(":spark-connector:spark-3.3").projectDir = file("spark-connector/v3.3/spark")
-  project(":spark-connector:spark-runtime-3.3").projectDir = file("spark-connector/v3.3/spark-runtime")
   // flink only support scala 2.12
   include("flink-connector:flink")
   include("flink-connector:flink-runtime")
 }
+include("spark-connector:spark-3.3", "spark-connector:spark-runtime-3.3")
+project(":spark-connector:spark-3.3").projectDir = file("spark-connector/v3.3/spark")
+project(":spark-connector:spark-runtime-3.3").projectDir = file("spark-connector/v3.3/spark-runtime")
 include("spark-connector:spark-3.4", "spark-connector:spark-runtime-3.4", "spark-connector:spark-3.5", "spark-connector:spark-runtime-3.5")
 project(":spark-connector:spark-3.4").projectDir = file("spark-connector/v3.4/spark")
 project(":spark-connector:spark-runtime-3.4").projectDir = file("spark-connector/v3.4/spark-runtime")
 project(":spark-connector:spark-3.5").projectDir = file("spark-connector/v3.5/spark")
 project(":spark-connector:spark-runtime-3.5").projectDir = file("spark-connector/v3.5/spark-runtime")
 include("web:web", "web:integration-test")
+include("web-v2:web", "web-v2:integration-test")
 include("docs")
 include("integration-test-common")
-include(":bundles:aws", ":bundles:aws-bundle")
-include(":bundles:gcp", ":bundles:gcp-bundle")
-include(":bundles:aliyun", ":bundles:aliyun-bundle")
-include(":bundles:azure", ":bundles:azure-bundle")
+include(":bundles:aws", ":bundles:aws-bundle", ":bundles:iceberg-aws-bundle")
+include(":bundles:gcp", ":bundles:gcp-bundle", ":bundles:iceberg-gcp-bundle")
+include(":bundles:aliyun", ":bundles:aliyun-bundle", ":bundles:iceberg-aliyun-bundle")
+include(":bundles:azure", ":bundles:azure-bundle", ":bundles:iceberg-azure-bundle")
 include(":catalogs:hadoop-common")
 include(":lineage")
+include(":mcp-server")
+include(
+  ":maintenance:optimizer-api",
+  ":maintenance:updaters",
+  ":maintenance:optimizer",
+  ":maintenance:jobs"
+)

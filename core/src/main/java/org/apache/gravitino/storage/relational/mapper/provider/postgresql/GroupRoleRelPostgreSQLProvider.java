@@ -30,8 +30,7 @@ public class GroupRoleRelPostgreSQLProvider extends GroupRoleRelBaseSQLProvider 
   public String softDeleteGroupRoleRelByGroupId(Long groupId) {
     return "UPDATE "
         + GROUP_ROLE_RELATION_TABLE_NAME
-        + " SET deleted_at = floor(extract(epoch from((current_timestamp -"
-        + " timestamp '1970-01-01 00:00:00')*1000)))"
+        + " SET deleted_at = CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS BIGINT)"
         + " WHERE group_id = #{groupId} AND deleted_at = 0";
   }
 
@@ -40,23 +39,29 @@ public class GroupRoleRelPostgreSQLProvider extends GroupRoleRelBaseSQLProvider 
     return "<script>"
         + "UPDATE "
         + GROUP_ROLE_RELATION_TABLE_NAME
-        + " SET deleted_at = floor(extract(epoch from((current_timestamp -"
-        + " timestamp '1970-01-01 00:00:00')*1000)))"
-        + " WHERE group_id = #{groupId} AND role_id in ("
+        + " SET deleted_at = CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS BIGINT)"
+        + " WHERE group_id = #{groupId} "
+        + "<choose>"
+        + "<when test='roleIds != null and roleIds.size() > 0'>"
+        + "AND role_id IN ("
         + "<foreach collection='roleIds' item='roleId' separator=','>"
         + "#{roleId}"
         + "</foreach>"
         + ") "
+        + "</when>"
+        + "<otherwise>"
+        + "AND 1 = 0 "
+        + "</otherwise>"
+        + "</choose>"
         + "AND deleted_at = 0"
         + "</script>";
   }
 
   @Override
-  public String softDeleteGroupRoleRelByMetalakeId(Long metalakeId) {
+  public String softDeleteGroupRoleRelByMetalakeId(@Param("metalakeId") Long metalakeId) {
     return "UPDATE "
         + GROUP_ROLE_RELATION_TABLE_NAME
-        + " SET deleted_at = floor(extract(epoch from((current_timestamp -"
-        + " timestamp '1970-01-01 00:00:00')*1000)))"
+        + " SET deleted_at = CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS BIGINT)"
         + " WHERE group_id IN (SELECT group_id FROM "
         + GROUP_TABLE_NAME
         + " WHERE metalake_id = #{metalakeId} AND deleted_at = 0)"
@@ -64,11 +69,10 @@ public class GroupRoleRelPostgreSQLProvider extends GroupRoleRelBaseSQLProvider 
   }
 
   @Override
-  public String softDeleteGroupRoleRelByRoleId(Long roleId) {
+  public String softDeleteGroupRoleRelByRoleId(@Param("roleId") Long roleId) {
     return "UPDATE "
         + GROUP_ROLE_RELATION_TABLE_NAME
-        + " SET deleted_at = floor(extract(epoch from((current_timestamp -"
-        + " timestamp '1970-01-01 00:00:00')*1000)))"
+        + " SET deleted_at = CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) * 1000 AS BIGINT)"
         + " WHERE role_id = #{roleId} AND deleted_at = 0";
   }
 

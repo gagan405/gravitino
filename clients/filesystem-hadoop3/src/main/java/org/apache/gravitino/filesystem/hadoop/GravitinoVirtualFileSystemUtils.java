@@ -19,8 +19,14 @@
 
 package org.apache.gravitino.filesystem.hadoop;
 
+import static org.apache.gravitino.client.GravitinoClientConfiguration.GRAVITINO_CLIENT_CONFIG_PREFIX;
+import static org.apache.gravitino.filesystem.hadoop.GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_CONFIG_PREFIX;
+import static org.apache.gravitino.filesystem.hadoop.GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_KERBEROS_PREFIX;
+import static org.apache.gravitino.filesystem.hadoop.GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_OAUTH2_PREFIX;
 import static org.apache.gravitino.filesystem.hadoop.GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_REQUEST_HEADER_PREFIX;
+import static org.apache.gravitino.filesystem.hadoop.GravitinoVirtualFileSystemConfiguration.NOT_GRAVITINO_CLIENT_CONFIG_LIST;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 import java.io.File;
@@ -30,9 +36,11 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.audit.CallerContext;
 import org.apache.gravitino.client.DefaultOAuth2TokenProvider;
 import org.apache.gravitino.client.GravitinoClient;
 import org.apache.gravitino.client.KerberosTokenProvider;
+import org.apache.gravitino.credential.CredentialConstants;
 import org.apache.hadoop.conf.Configuration;
 
 /** Utility class for Gravitino Virtual File System. */
@@ -56,6 +64,29 @@ public class GravitinoVirtualFileSystemUtils {
     // Don't use entry.getKey() directly in the lambda, because it cannot
     // handle variable expansion in the Configuration values.
     configuration.forEach(entry -> maps.put(entry.getKey(), configuration.get(entry.getKey())));
+    return maps;
+  }
+
+  /**
+   * Extract non-default configuration from Hadoop Configuration.
+   *
+   * @param configuration The Hadoop configuration.
+   * @return The configuration map.
+   */
+  public static Map<String, String> extractNonDefaultConfig(Configuration configuration) {
+    Map<String, String> maps = Maps.newHashMap();
+    // Don't use entry.getKey() directly in the lambda, because it cannot
+    // handle variable expansion in the Configuration values.
+    Configuration defaultConf = new Configuration();
+    configuration.forEach(
+        entry -> {
+          String key = entry.getKey();
+          String value = configuration.get(key);
+          // ignore the default configuration
+          if (!StringUtils.equals(value, defaultConf.get(key))) {
+            maps.put(key, value);
+          }
+        });
     return maps;
   }
 
@@ -94,6 +125,8 @@ public class GravitinoVirtualFileSystemUtils {
                     e -> e.getKey().substring(FS_GRAVITINO_CLIENT_REQUEST_HEADER_PREFIX.length()),
                     Map.Entry::getValue));
 
+    Map<String, String> clientConfig = extractClientConfig(configuration);
+
     String authType =
         configuration.getOrDefault(
             GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_AUTH_TYPE_KEY,
@@ -103,6 +136,7 @@ public class GravitinoVirtualFileSystemUtils {
           .withMetalake(metalakeValue)
           .withSimpleAuth()
           .withHeaders(requestHeaders)
+          .withClientConfig(clientConfig)
           .build();
     } else if (authType.equalsIgnoreCase(
         GravitinoVirtualFileSystemConfiguration.OAUTH2_AUTH_TYPE)) {
@@ -150,6 +184,7 @@ public class GravitinoVirtualFileSystemUtils {
           .withMetalake(metalakeValue)
           .withOAuth(authDataProvider)
           .withHeaders(requestHeaders)
+          .withClientConfig(clientConfig)
           .build();
     } else if (authType.equalsIgnoreCase(
         GravitinoVirtualFileSystemConfiguration.KERBEROS_AUTH_TYPE)) {
@@ -181,6 +216,7 @@ public class GravitinoVirtualFileSystemUtils {
           .withMetalake(metalakeValue)
           .withKerberosAuth(authDataProvider)
           .withHeaders(requestHeaders)
+          .withClientConfig(clientConfig)
           .build();
     } else {
       throw new IllegalArgumentException(
@@ -188,6 +224,27 @@ public class GravitinoVirtualFileSystemUtils {
               "Unsupported authentication type: %s for %s.",
               authType, GravitinoVirtualFileSystemConfiguration.FS_GRAVITINO_CLIENT_AUTH_TYPE_KEY));
     }
+  }
+
+  @VisibleForTesting
+  static Map<String, String> extractClientConfig(Map<String, String> configuration) {
+    return configuration.entrySet().stream()
+        .filter(e -> isClientConfigKey(e.getKey()))
+        .collect(
+            Collectors.toMap(
+                e ->
+                    e.getKey()
+                        .replace(FS_GRAVITINO_CLIENT_CONFIG_PREFIX, GRAVITINO_CLIENT_CONFIG_PREFIX),
+                Map.Entry::getValue,
+                (oldVal, newVal) -> newVal));
+  }
+
+  private static boolean isClientConfigKey(String key) {
+    return key.startsWith(FS_GRAVITINO_CLIENT_CONFIG_PREFIX)
+        && !key.startsWith(FS_GRAVITINO_CLIENT_OAUTH2_PREFIX)
+        && !key.startsWith(FS_GRAVITINO_CLIENT_KERBEROS_PREFIX)
+        && !key.startsWith(FS_GRAVITINO_CLIENT_REQUEST_HEADER_PREFIX)
+        && !NOT_GRAVITINO_CLIENT_CONFIG_LIST.contains(key);
   }
 
   /**
@@ -267,6 +324,13 @@ public class GravitinoVirtualFileSystemUtils {
         identifier);
 
     return gvfsPath.substring(prefix.length());
+  }
+
+  static void setCallerContextForGetCredentials(String locationName) {
+    Map<String, String> contextMap = Maps.newHashMap();
+    contextMap.put(CredentialConstants.HTTP_HEADER_CURRENT_LOCATION_NAME, locationName);
+    CallerContext callerContext = CallerContext.builder().withContext(contextMap).build();
+    CallerContext.CallerContextHolder.set(callerContext);
   }
 
   private static void checkAuthConfig(String authType, String configKey, String configValue) {

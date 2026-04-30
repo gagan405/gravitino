@@ -41,9 +41,18 @@ import org.apache.gravitino.dto.responses.DropResponse;
 import org.apache.gravitino.dto.responses.EntityListResponse;
 import org.apache.gravitino.dto.responses.SchemaResponse;
 import org.apache.gravitino.exceptions.NoSuchCatalogException;
+import org.apache.gravitino.exceptions.NoSuchPolicyException;
 import org.apache.gravitino.exceptions.NoSuchSchemaException;
 import org.apache.gravitino.exceptions.NonEmptySchemaException;
+import org.apache.gravitino.exceptions.PolicyAlreadyAssociatedException;
 import org.apache.gravitino.exceptions.SchemaAlreadyExistsException;
+import org.apache.gravitino.function.Function;
+import org.apache.gravitino.function.FunctionCatalog;
+import org.apache.gravitino.function.FunctionChange;
+import org.apache.gravitino.function.FunctionDefinition;
+import org.apache.gravitino.function.FunctionType;
+import org.apache.gravitino.policy.Policy;
+import org.apache.gravitino.policy.SupportsPolicies;
 import org.apache.gravitino.rest.RESTUtils;
 import org.apache.gravitino.tag.SupportsTags;
 import org.apache.gravitino.tag.Tag;
@@ -54,7 +63,12 @@ import org.apache.gravitino.tag.Tag;
  * create, load, alter and drop a schema with specified identifier.
  */
 abstract class BaseSchemaCatalog extends CatalogDTO
-    implements Catalog, SupportsSchemas, SupportsTags, SupportsRoles {
+    implements Catalog,
+        SupportsSchemas,
+        SupportsTags,
+        SupportsRoles,
+        SupportsPolicies,
+        FunctionCatalog {
 
   /** The REST client to send the requests. */
   protected final RESTClient restClient;
@@ -63,8 +77,10 @@ abstract class BaseSchemaCatalog extends CatalogDTO
   private final Namespace catalogNamespace;
 
   private final MetadataObjectTagOperations objectTagOperations;
+  private final MetadataObjectPolicyOperations objectPolicyOperations;
   private final MetadataObjectRoleOperations objectRoleOperations;
   protected final MetadataObjectCredentialOperations objectCredentialOperations;
+  private final FunctionCatalogOperations functionOperations;
 
   BaseSchemaCatalog(
       Namespace catalogNamespace,
@@ -88,11 +104,15 @@ abstract class BaseSchemaCatalog extends CatalogDTO
         MetadataObjects.of(null, this.name(), MetadataObject.Type.CATALOG);
     this.objectTagOperations =
         new MetadataObjectTagOperations(catalogNamespace.level(0), metadataObject, restClient);
+    this.objectPolicyOperations =
+        new MetadataObjectPolicyOperations(catalogNamespace.level(0), metadataObject, restClient);
     this.objectRoleOperations =
         new MetadataObjectRoleOperations(catalogNamespace.level(0), metadataObject, restClient);
     this.objectCredentialOperations =
         new MetadataObjectCredentialOperations(
             catalogNamespace.level(0), metadataObject, restClient);
+    this.functionOperations =
+        new FunctionCatalogOperations(restClient, catalogNamespace, this.name());
   }
 
   @Override
@@ -102,6 +122,11 @@ abstract class BaseSchemaCatalog extends CatalogDTO
 
   @Override
   public SupportsTags supportsTags() throws UnsupportedOperationException {
+    return this;
+  }
+
+  @Override
+  public SupportsPolicies supportsPolicies() throws UnsupportedOperationException {
     return this;
   }
 
@@ -253,6 +278,27 @@ abstract class BaseSchemaCatalog extends CatalogDTO
   }
 
   @Override
+  public String[] listPolicies() {
+    return objectPolicyOperations.listPolicies();
+  }
+
+  @Override
+  public Policy[] listPolicyInfos() {
+    return objectPolicyOperations.listPolicyInfos();
+  }
+
+  @Override
+  public Policy getPolicy(String name) throws NoSuchPolicyException {
+    return objectPolicyOperations.getPolicy(name);
+  }
+
+  @Override
+  public String[] associatePolicies(String[] policiesToAdd, String[] policiesToRemove)
+      throws PolicyAlreadyAssociatedException {
+    return objectPolicyOperations.associatePolicies(policiesToAdd, policiesToRemove);
+  }
+
+  @Override
   public String[] listBindingRoleNames() {
     return objectRoleOperations.listBindingRoleNames();
   }
@@ -283,5 +329,46 @@ abstract class BaseSchemaCatalog extends CatalogDTO
         .append(RESTUtils.encodeString(ns.level(1)))
         .append("/schemas")
         .toString();
+  }
+
+  @Override
+  public FunctionCatalog asFunctionCatalog() {
+    return this;
+  }
+
+  @Override
+  public NameIdentifier[] listFunctions(Namespace namespace) {
+    return functionOperations.listFunctions(namespace);
+  }
+
+  @Override
+  public Function[] listFunctionInfos(Namespace namespace) throws NoSuchSchemaException {
+    return functionOperations.listFunctionInfos(namespace);
+  }
+
+  @Override
+  public Function getFunction(NameIdentifier ident) {
+    return functionOperations.getFunction(ident);
+  }
+
+  @Override
+  public Function registerFunction(
+      NameIdentifier ident,
+      String comment,
+      FunctionType functionType,
+      boolean deterministic,
+      FunctionDefinition[] definitions) {
+    return functionOperations.registerFunction(
+        ident, comment, functionType, deterministic, definitions);
+  }
+
+  @Override
+  public Function alterFunction(NameIdentifier ident, FunctionChange... changes) {
+    return functionOperations.alterFunction(ident, changes);
+  }
+
+  @Override
+  public boolean dropFunction(NameIdentifier ident) {
+    return functionOperations.dropFunction(ident);
   }
 }

@@ -15,9 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Any, ClassVar, Dict, cast
+from typing import Any, Dict, cast
 
-from gravitino.api.types.json_serdes._helper.serdes_utils import (
+from gravitino.api.rel.types.json_serdes._helper.serdes_utils import (
     SerdesUtils as TypesSerdesUtils,
 )
 from gravitino.dto.rel.expressions.field_reference_dto import FieldReferenceDTO
@@ -27,17 +27,10 @@ from gravitino.dto.rel.expressions.literal_dto import LiteralDTO
 from gravitino.dto.rel.expressions.unparsed_expression_dto import UnparsedExpressionDTO
 from gravitino.exceptions.base import IllegalArgumentException
 from gravitino.utils.precondition import Precondition
+from gravitino.utils.serdes import SerdesUtilsBase
 
 
-class SerdesUtils:
-    EXPRESSION_TYPE: ClassVar[str] = "type"
-    DATA_TYPE: ClassVar[str] = "dataType"
-    LITERAL_VALUE: ClassVar[str] = "value"
-    FIELD_NAME: ClassVar[str] = "fieldName"
-    FUNCTION_NAME: ClassVar[str] = "funcName"
-    FUNCTION_ARGS: ClassVar[str] = "funcArgs"
-    UNPARSED_EXPRESSION: ClassVar[str] = "unparsedExpression"
-
+class SerdesUtils(SerdesUtilsBase):
     @classmethod
     def write_function_arg(cls, arg: FunctionArg) -> Dict[str, Any]:
         arg_type = arg.arg_type()
@@ -80,10 +73,10 @@ class SerdesUtils:
         )
         try:
             arg_type = FunctionArg.ArgType(data[cls.EXPRESSION_TYPE].lower())
-        except ValueError:
+        except ValueError as exc:
             raise IllegalArgumentException(
                 f"Unknown function argument type: {data[cls.EXPRESSION_TYPE]}"
-            )
+            ) from exc
 
         if arg_type is FunctionArg.ArgType.LITERAL:
             Precondition.check_argument(
@@ -131,9 +124,12 @@ class SerdesUtils:
                 .build()
             )
 
-        if arg_type is FunctionArg.ArgType.UNPARSED:
-            Precondition.check_argument(
-                isinstance(data.get(cls.UNPARSED_EXPRESSION), str),
-                f"Cannot parse unparsed expression from missing string field unparsedExpression: {data}",
-            )
-            return UnparsedExpressionDTO(data[cls.UNPARSED_EXPRESSION])
+        Precondition.check_argument(
+            arg_type is FunctionArg.ArgType.UNPARSED,
+            f"Unknown function argument type: {arg_type}",
+        )
+        Precondition.check_argument(
+            isinstance(data.get(cls.UNPARSED_EXPRESSION), str),
+            f"Cannot parse unparsed expression from missing string field unparsedExpression: {data}",
+        )
+        return UnparsedExpressionDTO(data[cls.UNPARSED_EXPRESSION])
